@@ -2,3 +2,7 @@ node_modules
 .env
 .env.local
 .env.*.local
+
+# Build outputs (should never be committed)
+build/
+dist/

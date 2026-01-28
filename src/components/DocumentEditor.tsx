@@ -5,10 +5,14 @@ import {
   Underline, 
   List,
   ListOrdered,
-  MoveHorizontal
+  MoveHorizontal,
+  Sparkles,
+  Loader2
 } from 'lucide-react';
 import { MarginText } from './MarginText';
 import Vector59 from '../imports/Vector59';
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
+import { generateWithGemini, type GeminiAction } from '../lib/gemini';
 
 export function DocumentEditor() {
   const editorRef = useRef<HTMLDivElement>(null);
@@ -36,6 +40,9 @@ export function DocumentEditor() {
   const [additionalSelections, setAdditionalSelections] = useState<Range[]>([]);
   const [isShiftSelecting, setIsShiftSelecting] = useState(false);
   const shiftSelectStart = useRef<{ x: number; y: number } | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const savedSelection = useRef<Range | null>(null);
 
   // Auto-set margin side when there are texts
   useEffect(() => {
@@ -108,6 +115,53 @@ export function DocumentEditor() {
 
   const handleFormat = (command: string, value?: string) => {
     document.execCommand(command, false, value);
+    editorRef.current?.focus();
+  };
+
+  const handleAiAction = async (action: GeminiAction) => {
+    const selection = window.getSelection();
+    if (!selection || !editorRef.current) return;
+
+    const range = selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
+    const selectedText = (selection.toString() ?? '').trim();
+
+    if (!selectedText) {
+      setAiError('Select some text first.');
+      return;
+    }
+
+    setAiError(null);
+    setAiLoading(true);
+    savedSelection.current = range;
+
+    const result = await generateWithGemini(action, selectedText);
+    setAiLoading(false);
+
+    if (!result.ok) {
+      setAiError(result.error);
+      return;
+    }
+
+    const r = savedSelection.current;
+    const editor = editorRef.current;
+    if (r && editor.contains(r.startContainer)) {
+      try {
+        const sel = window.getSelection();
+        if (sel) {
+          sel.removeAllRanges();
+          sel.addRange(r);
+          r.deleteContents();
+          r.insertNode(document.createTextNode(result.text));
+          r.collapse(false);
+          sel.removeAllRanges();
+          sel.addRange(r);
+        }
+      } catch {
+        setAiError('Could not replace selection. Result: ' + result.text.slice(0, 80));
+      }
+    } else {
+      setAiError('Selection changed. Result: ' + result.text.slice(0, 120));
+    }
     editorRef.current?.focus();
   };
 
@@ -783,6 +837,61 @@ export function DocumentEditor() {
           >
             <ListOrdered className="w-4 h-4" style={{ transform: 'scale(1.1)' }} />
           </button>
+
+          <div className="w-3" />
+
+          {/* AI actions — Gemini (low-cost model) */}
+          <Popover>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                className="p-1.5 hover:text-gray-700 transition-colors disabled:opacity-50"
+                title="AI: Summarize, improve, or expand selection"
+                disabled={aiLoading}
+                aria-label="AI actions"
+              >
+                {aiLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
+                ) : (
+                  <Sparkles className="w-4 h-4" aria-hidden />
+                )}
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-56 p-2">
+              <p className="text-xs text-gray-500 mb-2 px-1">Select text, then:</p>
+              <div className="flex flex-col gap-0.5">
+                <button
+                  type="button"
+                  className="text-left text-sm px-2 py-1.5 rounded hover:bg-gray-100"
+                  onClick={() => handleAiAction('summarize')}
+                  disabled={aiLoading}
+                >
+                  Summarize
+                </button>
+                <button
+                  type="button"
+                  className="text-left text-sm px-2 py-1.5 rounded hover:bg-gray-100"
+                  onClick={() => handleAiAction('improve')}
+                  disabled={aiLoading}
+                >
+                  Improve writing
+                </button>
+                <button
+                  type="button"
+                  className="text-left text-sm px-2 py-1.5 rounded hover:bg-gray-100"
+                  onClick={() => handleAiAction('expand')}
+                  disabled={aiLoading}
+                >
+                  Expand
+                </button>
+              </div>
+              {aiError && (
+                <p className="text-xs text-red-600 mt-2 px-1 break-words" role="alert">
+                  {aiError}
+                </p>
+              )}
+            </PopoverContent>
+          </Popover>
         </div>
       </div>
 

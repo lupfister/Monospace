@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { 
   Bold, 
   Italic, 
@@ -14,10 +14,14 @@ import Vector59 from '../imports/Vector59';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { generateWithGemini, type GeminiAction } from '../lib/gemini';
 import { createHumanTextSpan, createAiTextSpan, isHumanTextSpan } from '../lib/textStyles';
+import { type WebSearchResults, parseSearchResults } from '../lib/webSearch';
+import { searchForContent, performWebSearch } from '../lib/searchAPI';
+import { getLinkPreview, isProbablyUrl, type LinkPreviewData } from '../lib/linkPreviews';
 
 export function DocumentEditor() {
   const editorRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const linkPreviewInFlight = useRef<Set<string>>(new Set());
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [draggedContent, setDraggedContent] = useState('');
@@ -44,6 +48,7 @@ export function DocumentEditor() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const savedSelection = useRef<Range | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
 
   // Auto-set margin side when there are texts
   useEffect(() => {
@@ -54,6 +59,852 @@ export function DocumentEditor() {
       setMarginSide(null);
     }
   }, [marginTexts, marginSide]);
+
+  const createLinkAnchor = useCallback((url: string) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.className =
+      'text-blue-600 underline underline-offset-2 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 rounded-sm';
+    a.textContent = url;
+    a.tabIndex = 0;
+    a.setAttribute('aria-label', `Open link: ${url}`);
+    a.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      window.open(url, '_blank', 'noopener,noreferrer');
+    });
+    return a;
+  }, []);
+
+  const buildLinkPreviewCard = useCallback((url: string) => {
+    const wrapper = document.createElement('div');
+    wrapper.dataset.embed = 'link-preview';
+    wrapper.dataset.url = url;
+    wrapper.contentEditable = 'false';
+    wrapper.className =
+      // NOTE: this project ships a pre-generated Tailwind CSS subset (no tailwind.config),
+      // so we only use utility classes that are confirmed to exist in `src/index.css`.
+      'w-full max-w-3xl mx-auto rounded-lg border border-gray-200 bg-white shadow-sm overflow-hidden';
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.className = 'block hover:bg-gray-100 transition-colors';
+    link.tabIndex = 0;
+
+    const container = document.createElement('div');
+    container.className = 'flex';
+
+    // Image slot (only shown if we successfully load an image)
+    const imageWrapper = document.createElement('div');
+    imageWrapper.dataset.part = 'image-wrapper';
+    imageWrapper.className = 'bg-gray-100 flex-shrink-0 overflow-hidden';
+    // Use minimal inline size because many size utilities aren't present in the prebuilt CSS.
+    imageWrapper.style.width = '96px';
+    imageWrapper.style.height = '96px';
+
+    const imagePlaceholder = document.createElement('div');
+    imagePlaceholder.dataset.part = 'image-placeholder';
+    imagePlaceholder.className = 'w-full h-full';
+    imageWrapper.appendChild(imagePlaceholder);
+
+    // Content section (right side on desktop)
+    const contentWrapper = document.createElement('div');
+    contentWrapper.className = 'flex-1 p-4 flex flex-col justify-between min-w-0';
+
+    const textContent = document.createElement('div');
+    textContent.className = 'flex-1';
+
+    const title = document.createElement('div');
+    title.dataset.part = 'title';
+    title.className = 'h-5 w-3/5 rounded-lg bg-gray-200';
+    title.setAttribute('aria-hidden', 'true');
+
+    const desc = document.createElement('div');
+    desc.dataset.part = 'description';
+    desc.className = 'h-4 w-4/5 rounded-lg bg-gray-100';
+    desc.setAttribute('aria-hidden', 'true');
+
+    const urlRow = document.createElement('div');
+    urlRow.dataset.part = 'url';
+    urlRow.className = 'pt-1';
+    
+    const urlText = document.createElement('div');
+    urlText.className = 'text-sm text-gray-500 truncate';
+    
+    const urlSpan = document.createElement('span');
+    urlSpan.textContent = url;
+    urlText.appendChild(urlSpan);
+    urlRow.appendChild(urlText);
+
+    textContent.appendChild(title);
+    textContent.appendChild(desc);
+    contentWrapper.appendChild(textContent);
+    contentWrapper.appendChild(urlRow);
+
+    // Image (left) + content (right)
+    container.appendChild(imageWrapper);
+    container.appendChild(contentWrapper);
+    link.appendChild(container);
+    wrapper.appendChild(link);
+
+    return wrapper;
+  }, []);
+
+  const hydrateLinkPreviewCard = useCallback(async (card: HTMLElement, url: string) => {
+    if (linkPreviewInFlight.current.has(url)) return;
+    linkPreviewInFlight.current.add(url);
+    try {
+      const data = await getLinkPreview(url);
+      if (!data) {
+        // If fetch failed, show a simple link card
+        const titleEl = card.querySelector<HTMLElement>('[data-part="title"]');
+        if (titleEl) {
+          titleEl.className = 'text-base font-semibold text-gray-900';
+          titleEl.textContent = url;
+          titleEl.removeAttribute('aria-hidden');
+        }
+        const descEl = card.querySelector<HTMLElement>('[data-part="description"]');
+        if (descEl) descEl.remove();
+        return;
+      }
+      
+      if (card.dataset.embed !== 'link-preview') return;
+      if (card.dataset.url !== url) return;
+
+      const titleEl = card.querySelector<HTMLElement>('[data-part="title"]');
+      const descEl = card.querySelector<HTMLElement>('[data-part="description"]');
+      const urlEl = card.querySelector<HTMLElement>('[data-part="url"]');
+      const imageWrapper = card.querySelector<HTMLElement>('[data-part="image-wrapper"]');
+      const imagePlaceholder = card.querySelector<HTMLElement>('[data-part="image-placeholder"]');
+
+      const effectiveTitle = (data.title || data.siteName || url).trim();
+      const effectiveDescription = (data.description || '').trim();
+
+      // Update title
+      if (titleEl) {
+        titleEl.className = 'text-sm font-semibold truncate';
+        titleEl.textContent = effectiveTitle;
+        titleEl.removeAttribute('aria-hidden');
+      }
+
+      // Update description
+      if (descEl) {
+        if (effectiveDescription) {
+          descEl.className = 'text-sm text-gray-600';
+          descEl.textContent = effectiveDescription;
+          descEl.removeAttribute('aria-hidden');
+        } else {
+          descEl.remove();
+        }
+      }
+
+      // Update URL display
+      if (urlEl) {
+        const urlText = urlEl.querySelector('span:last-child');
+        if (urlText) {
+          try {
+            const u = new URL(url);
+            const displayText = data.siteName 
+              ? `${data.siteName} · ${u.hostname.replace('www.', '')}`
+              : u.hostname.replace('www.', '');
+            urlText.textContent = displayText;
+          } catch {
+            urlText.textContent = url;
+          }
+        }
+      }
+
+      // Update image (only if og/twitter image exists)
+      if (imageWrapper && imagePlaceholder) {
+        if (!data.imageUrl) {
+          imageWrapper.remove();
+          return;
+        }
+
+        const img = document.createElement('img');
+        img.src = data.imageUrl;
+        img.alt = '';
+        img.loading = 'lazy';
+        img.className = 'w-full h-full';
+        img.style.objectFit = 'cover';
+        img.onerror = () => {
+          imageWrapper.remove();
+        };
+        img.onload = () => {
+          imagePlaceholder.replaceWith(img);
+        };
+      }
+    } catch (error) {
+      console.error('Failed to hydrate link preview:', error);
+      // Show fallback
+      const titleEl = card.querySelector<HTMLElement>('[data-part="title"]');
+      if (titleEl) {
+        titleEl.className = 'text-base font-semibold text-gray-900';
+        titleEl.textContent = url;
+        titleEl.removeAttribute('aria-hidden');
+      }
+      const descEl = card.querySelector<HTMLElement>('[data-part="description"]');
+      if (descEl) descEl.remove();
+    } finally {
+      linkPreviewInFlight.current.delete(url);
+    }
+  }, []);
+
+  const processLinksAndEmbeds = useCallback(() => {
+    const root = editorRef.current;
+    if (!root) return;
+
+    // 1) Convert raw URLs inside text nodes into anchors (skip inside existing anchors and embed cards)
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => {
+        const parent = (node as Text).parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        if (parent.closest('a')) return NodeFilter.FILTER_REJECT;
+        if (parent.closest('[data-embed="link-preview"]')) return NodeFilter.FILTER_REJECT;
+        if (!(node.textContent || '').includes('http')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    const urlRegex = /(https?:\/\/[^\s<>"'()]+[^\s<>"'().,;:!?])/g;
+    const textNodes: Text[] = [];
+    let n: Node | null;
+    while ((n = walker.nextNode())) {
+      textNodes.push(n as Text);
+    }
+
+    for (const textNode of textNodes) {
+      const text = textNode.textContent || '';
+      if (!urlRegex.test(text)) continue;
+      urlRegex.lastIndex = 0;
+
+      const frag = document.createDocumentFragment();
+      let lastIndex = 0;
+      let match: RegExpExecArray | null;
+
+      while ((match = urlRegex.exec(text))) {
+        const start = match.index;
+        const end = start + match[0].length;
+        const url = match[0];
+
+        if (start > lastIndex) {
+          frag.appendChild(document.createTextNode(text.slice(lastIndex, start)));
+        }
+        frag.appendChild(createLinkAnchor(url));
+        lastIndex = end;
+      }
+
+      if (lastIndex < text.length) {
+        frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+      }
+
+      textNode.parentNode?.replaceChild(frag, textNode);
+    }
+
+    const replaceWithCard = (target: Node, url: string) => {
+      const card = buildLinkPreviewCard(url);
+      const block = document.createElement('div');
+      block.appendChild(card);
+      const spacer = document.createElement('p');
+      spacer.appendChild(document.createElement('br'));
+      block.appendChild(spacer);
+
+      if (target.parentNode) {
+        target.parentNode.replaceChild(block, target);
+      } else {
+        root.appendChild(block);
+      }
+
+      hydrateLinkPreviewCard(card, url);
+    };
+
+    // 2a) Handle editors that contain plain spans/text (no <p> wrappers)
+    const rootText = (root.textContent || '').trim();
+    if (isProbablyUrl(rootText)) {
+      const meaningfulRootChildren = (Array.from(root.childNodes) as ChildNode[]).filter((cn) => {
+        if (cn.nodeType === Node.TEXT_NODE) return ((cn as Text).textContent || '').trim().length > 0;
+        if (cn.nodeType === Node.ELEMENT_NODE) return true;
+        return false;
+      });
+
+      // Replace only when it's basically "just the URL"
+      if (meaningfulRootChildren.length === 1) {
+        const onlyChild = meaningfulRootChildren[0];
+        if (!(onlyChild as Element)?.closest?.('[data-embed="link-preview"]')) {
+          replaceWithCard(onlyChild, rootText);
+        }
+      }
+    }
+
+    // 2b) If a paragraph/div/li is ONLY a single URL, replace it with a preview card
+    const blocks = root.querySelectorAll<HTMLElement>('p, div, li, blockquote');
+    blocks.forEach((block) => {
+      if (block === root) return;
+      if (block.closest('[data-embed="link-preview"]')) return;
+      if (block.querySelector('[data-embed="link-preview"]')) return;
+
+      const text = (block.textContent || '').trim();
+      if (!isProbablyUrl(text)) return;
+
+      // Avoid replacing blocks that contain more than just the URL (e.g. extra nodes)
+      const meaningfulChildren = (Array.from(block.childNodes) as ChildNode[]).filter((cn) => {
+        if (cn.nodeType === Node.TEXT_NODE) return ((cn as Text).textContent || '').trim().length > 0;
+        if (cn.nodeType === Node.ELEMENT_NODE) return true;
+        return false;
+      });
+
+      if (meaningfulChildren.length > 2) return;
+
+      replaceWithCard(block, text);
+    });
+
+    // 3) Hydrate any existing cards that haven’t loaded yet
+    const cards = root.querySelectorAll<HTMLElement>('[data-embed="link-preview"][data-url]');
+    cards.forEach((card) => {
+      const url = card.dataset.url;
+      if (!url) return;
+      hydrateLinkPreviewCard(card, url);
+    });
+  }, [buildLinkPreviewCard, createLinkAnchor, hydrateLinkPreviewCard]);
+
+  useEffect(() => {
+    const root = editorRef.current;
+    if (!root) return;
+
+    let rafId: number | null = null;
+    const schedule = () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => processLinksAndEmbeds());
+    };
+
+    const observer = new MutationObserver(() => schedule());
+    observer.observe(root, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+
+    // initial pass (e.g. restored from localStorage)
+    schedule();
+
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      observer.disconnect();
+    };
+  }, [processLinksAndEmbeds]);
+
+
+  const insertSearchResultsInline = useCallback(async (
+    results: WebSearchResults,
+    selection: Selection
+  ) => {
+    if (!editorRef.current || !selection) {
+      console.error('Cannot insert: editorRef or selection is null');
+      return;
+    }
+    
+    console.log('insertSearchResultsInline called with:', results);
+
+    // Get insertion point (similar to AI review)
+    const range = selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
+    if (!range) return;
+
+    let insertAfterElement: Node | null = null;
+    let container: Node = range.startContainer;
+    if (container.nodeType === Node.TEXT_NODE) {
+      container = container.parentElement || container;
+    }
+
+    // Find block element to insert after
+    let blockElement: HTMLElement | null = null;
+    let current: Node | null = container as Node;
+    
+    while (current && current !== editorRef.current) {
+      if (current.nodeType === Node.ELEMENT_NODE) {
+        const el = current as HTMLElement;
+        if (el.tagName === 'P' || el.tagName === 'DIV' || 
+            el.tagName.match(/^H[1-6]$/) || el.tagName === 'LI') {
+          blockElement = el;
+          break;
+        }
+      }
+      current = current.parentNode;
+    }
+
+    insertAfterElement = blockElement || container;
+
+    try {
+      const sel = window.getSelection();
+      if (!sel || !editorRef.current || !insertAfterElement) return;
+
+      const insertRange = document.createRange();
+      
+      if (insertAfterElement.parentNode) {
+        insertRange.setStartAfter(insertAfterElement);
+        insertRange.collapse(true);
+      } else {
+        insertRange.selectNodeContents(editorRef.current);
+        insertRange.collapse(false);
+      }
+
+      // Create container for search results
+      const resultsContainer = document.createElement('div');
+      resultsContainer.style.marginTop = '16px';
+      resultsContainer.style.marginBottom = '16px';
+      resultsContainer.style.padding = '16px';
+      resultsContainer.style.borderLeft = '3px solid #3b82f6';
+      resultsContainer.style.backgroundColor = '#f8fafc';
+      resultsContainer.style.borderRadius = '4px';
+
+      // Add header
+      const header = document.createElement('div');
+      header.style.marginBottom = '12px';
+      header.style.fontSize = '14px';
+      header.style.fontWeight = '600';
+      header.style.color = '#1e293b';
+      header.textContent = '?? Search Results';
+      resultsContainer.appendChild(header);
+
+      // Add YouTube videos
+      if (results.videos.length > 0) {
+        const videosSection = document.createElement('div');
+        videosSection.style.marginBottom = '16px';
+        
+        const videosTitle = document.createElement('div');
+        videosTitle.style.fontSize = '13px';
+        videosTitle.style.fontWeight = '600';
+        videosTitle.style.color = '#dc2626';
+        videosTitle.style.marginBottom = '8px';
+        videosTitle.textContent = '?? YouTube Videos';
+        videosSection.appendChild(videosTitle);
+
+        results.videos.slice(0, 3).forEach((video) => {
+          const videoItem = document.createElement('div');
+          videoItem.style.marginBottom = '12px';
+          videoItem.style.padding = '8px';
+          videoItem.style.backgroundColor = 'white';
+          videoItem.style.borderRadius = '4px';
+          videoItem.style.border = '1px solid #e2e8f0';
+
+          const videoLink = document.createElement('a');
+          videoLink.href = video.url;
+          videoLink.target = '_blank';
+          videoLink.rel = 'noopener noreferrer';
+          videoLink.style.textDecoration = 'none';
+          videoLink.style.color = '#2563eb';
+          videoLink.style.fontSize = '13px';
+          videoLink.style.fontWeight = '500';
+          videoLink.textContent = video.title;
+          videoItem.appendChild(videoLink);
+
+          if (video.snippet) {
+            const snippet = document.createElement('div');
+            snippet.style.fontSize = '12px';
+            snippet.style.color = '#64748b';
+            snippet.style.marginTop = '4px';
+            snippet.textContent = video.snippet.substring(0, 150) + (video.snippet.length > 150 ? '...' : '');
+            videoItem.appendChild(snippet);
+          }
+
+          const urlText = document.createElement('div');
+          urlText.style.fontSize = '11px';
+          urlText.style.color = '#94a3b8';
+          urlText.style.marginTop = '4px';
+          urlText.textContent = video.url;
+          videoItem.appendChild(urlText);
+
+          videosSection.appendChild(videoItem);
+        });
+
+        resultsContainer.appendChild(videosSection);
+      }
+
+      // Add Articles
+      if (results.articles.length > 0) {
+        const articlesSection = document.createElement('div');
+        articlesSection.style.marginBottom = '16px';
+        
+        const articlesTitle = document.createElement('div');
+        articlesTitle.style.fontSize = '13px';
+        articlesTitle.style.fontWeight = '600';
+        articlesTitle.style.color = '#2563eb';
+        articlesTitle.style.marginBottom = '8px';
+        articlesTitle.textContent = '?? Articles';
+        articlesSection.appendChild(articlesTitle);
+
+        results.articles.slice(0, 3).forEach((article) => {
+          const articleItem = document.createElement('div');
+          articleItem.style.marginBottom = '12px';
+          articleItem.style.padding = '8px';
+          articleItem.style.backgroundColor = 'white';
+          articleItem.style.borderRadius = '4px';
+          articleItem.style.border = '1px solid #e2e8f0';
+
+          const articleLink = document.createElement('a');
+          articleLink.href = article.url;
+          articleLink.target = '_blank';
+          articleLink.rel = 'noopener noreferrer';
+          articleLink.style.textDecoration = 'none';
+          articleLink.style.color = '#2563eb';
+          articleLink.style.fontSize = '13px';
+          articleLink.style.fontWeight = '500';
+          articleLink.textContent = article.title;
+          articleItem.appendChild(articleLink);
+
+          if (article.snippet) {
+            const snippet = document.createElement('div');
+            snippet.style.fontSize = '12px';
+            snippet.style.color = '#64748b';
+            snippet.style.marginTop = '4px';
+            snippet.textContent = article.snippet.substring(0, 150) + (article.snippet.length > 150 ? '...' : '');
+            articleItem.appendChild(snippet);
+          }
+
+          const urlText = document.createElement('div');
+          urlText.style.fontSize = '11px';
+          urlText.style.color = '#94a3b8';
+          urlText.style.marginTop = '4px';
+          urlText.textContent = article.url;
+          articleItem.appendChild(urlText);
+
+          articlesSection.appendChild(articleItem);
+        });
+
+        resultsContainer.appendChild(articlesSection);
+      }
+
+      // Add Images
+      if (results.images.length > 0) {
+        const imagesSection = document.createElement('div');
+        imagesSection.style.marginBottom = '16px';
+        
+        const imagesTitle = document.createElement('div');
+        imagesTitle.style.fontSize = '13px';
+        imagesTitle.style.fontWeight = '600';
+        imagesTitle.style.color = '#16a34a';
+        imagesTitle.style.marginBottom = '8px';
+        imagesTitle.textContent = '??? Images';
+        imagesSection.appendChild(imagesTitle);
+
+        const imagesGrid = document.createElement('div');
+        imagesGrid.style.display = 'grid';
+        imagesGrid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(120px, 1fr))';
+        imagesGrid.style.gap = '8px';
+
+        results.images.slice(0, 6).forEach((image) => {
+          const imageItem = document.createElement('a');
+          imageItem.href = image.url;
+          imageItem.target = '_blank';
+          imageItem.rel = 'noopener noreferrer';
+          imageItem.style.display = 'block';
+          imageItem.style.textDecoration = 'none';
+
+          const img = document.createElement('img');
+          img.src = image.thumbnail || image.url;
+          img.alt = image.title || 'Image';
+          img.style.width = '100%';
+          img.style.height = '120px';
+          img.style.objectFit = 'cover';
+          img.style.borderRadius = '4px';
+          img.style.border = '1px solid #e2e8f0';
+          img.onerror = () => {
+            img.style.display = 'none';
+          };
+
+          imageItem.appendChild(img);
+          imagesGrid.appendChild(imageItem);
+        });
+
+        imagesSection.appendChild(imagesGrid);
+        resultsContainer.appendChild(imagesSection);
+      }
+
+      // If no results, show message
+      if (results.videos.length === 0 && results.articles.length === 0 && results.images.length === 0) {
+        const noResults = document.createElement('div');
+        noResults.style.fontSize = '13px';
+        noResults.style.color = '#64748b';
+        noResults.style.fontStyle = 'italic';
+        noResults.textContent = 'No results found. Try a different search query.';
+        resultsContainer.appendChild(noResults);
+      }
+
+      // Insert the results container
+      console.log('Inserting results container with', results.videos.length, 'videos,', results.articles.length, 'articles,', results.images.length, 'images');
+      insertRange.insertNode(resultsContainer);
+
+      // Add spacing after
+      const br = document.createElement('br');
+      insertRange.setStartAfter(resultsContainer);
+      insertRange.collapse(true);
+      insertRange.insertNode(br);
+
+      // Move cursor after the inserted content
+      insertRange.setStartAfter(br);
+      insertRange.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(insertRange);
+
+      editorRef.current?.focus();
+      console.log('Results inserted successfully!');
+    } catch (error) {
+      console.error('Error inserting results:', error);
+      setAiError('Could not insert search results. ' + (error instanceof Error ? error.message : String(error)));
+    }
+  }, [setAiError]);
+
+  const handleAiReview = useCallback(async () => {
+    const selection = window.getSelection();
+    if (!selection || !editorRef.current) return;
+
+    // Get the current cursor position
+    const range = selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
+    if (!range) return;
+
+    // Find the paragraph or block element containing the cursor
+    let container: Node = range.startContainer;
+    if (container.nodeType === Node.TEXT_NODE) {
+      container = container.parentElement || container;
+    }
+
+    // Walk up to find a block element (p, div, h1-h6, li, etc.)
+    let blockElement: HTMLElement | null = null;
+    let current: Node | null = container as Node;
+    
+    while (current && current !== editorRef.current) {
+      if (current.nodeType === Node.ELEMENT_NODE) {
+        const el = current as HTMLElement;
+        if (el.tagName === 'P' || el.tagName === 'DIV' || 
+            el.tagName.match(/^H[1-6]$/) || el.tagName === 'LI' ||
+            el.tagName === 'BLOCKQUOTE') {
+          blockElement = el;
+          break;
+        }
+      }
+      current = current.parentNode;
+    }
+
+    // Get text to review from the block element
+    let textToReview = '';
+    let insertAfterElement: Node | null = null;
+
+    if (blockElement) {
+      // Get all text from the block element
+      const textRange = document.createRange();
+      textRange.selectNodeContents(blockElement);
+      textToReview = textRange.toString().trim();
+      insertAfterElement = blockElement;
+    } else {
+      // Fallback: if no block element, we need to get ALL text from the editor
+      // This handles cases where text is in spans without a paragraph wrapper
+      
+      // First, try to find the closest containing element that has text
+      let startNode: Node = range.startContainer;
+      let containingElement: HTMLElement | null = null;
+      
+      // Walk up to find any element that contains text
+      let current: Node | null = startNode;
+      while (current && current !== editorRef.current) {
+        if (current.nodeType === Node.ELEMENT_NODE) {
+          const el = current as HTMLElement;
+          const textContent = el.textContent?.trim() || '';
+          if (textContent && textContent !== 'Start writing...') {
+            containingElement = el;
+            break;
+          }
+        }
+        current = current.parentNode;
+      }
+      
+      if (containingElement) {
+        // Get all text from this containing element
+        const textRange = document.createRange();
+        textRange.selectNodeContents(containingElement);
+        textToReview = textRange.toString().trim();
+        insertAfterElement = containingElement;
+      } else {
+        // Last resort: get ALL text from the entire editor (excluding placeholder)
+        // This ensures we get the full sentence even if structure is complex
+        // Use innerText or textContent to get all text in document order
+        let allText = editorRef.current.innerText || editorRef.current.textContent || '';
+        
+        // Remove placeholder text if present
+        allText = allText.replace(/Start writing\.\.\./g, '').trim();
+        
+        textToReview = allText;
+        
+        // Find the last element with text to insert after
+        const walker = document.createTreeWalker(
+          editorRef.current,
+          NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+          {
+            acceptNode: (node) => {
+              // Skip placeholder
+              if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim() === 'Start writing...') {
+                return NodeFilter.FILTER_REJECT;
+              }
+              return NodeFilter.FILTER_ACCEPT;
+            }
+          }
+        );
+        
+        let lastElement: Node | null = null;
+        let node: Node | null;
+        while (node = walker.nextNode()) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const el = node as HTMLElement;
+            if (el.textContent?.trim() && el.textContent.trim() !== 'Start writing...') {
+              lastElement = el;
+            }
+          } else if (node.nodeType === Node.TEXT_NODE) {
+            const text = node.textContent?.trim() || '';
+            if (text && text !== 'Start writing...') {
+              lastElement = node.parentElement || node;
+            }
+          }
+        }
+        
+        // Use the last element or editor as insert point
+        if (lastElement) {
+          insertAfterElement = lastElement as HTMLElement;
+        } else if (editorRef.current.lastChild) {
+          insertAfterElement = editorRef.current.lastChild as HTMLElement;
+        } else {
+          insertAfterElement = editorRef.current;
+        }
+      }
+    }
+
+    if (!textToReview || textToReview === 'Start writing...') {
+      setAiError('No text found to review. Please write something first.');
+      return;
+    }
+
+    setAiError(null);
+    setAiLoading(true);
+
+    const result = await generateWithGemini('review', textToReview);
+    setAiLoading(false);
+
+    if (!result.ok) {
+      setAiError(result.error);
+      return;
+    }
+
+    // Parse AI response for search tags
+    const searchTagMatch = result.text.match(/\[SEARCH_(VIDEOS|ARTICLES|IMAGES|ALL):\s*(.+?)\]/);
+    let aiResponseText = result.text;
+    let searchQuery: string | null = null;
+    let searchType: 'video' | 'web' | 'image' | 'all' | null = null;
+
+    if (searchTagMatch) {
+      const [, type, query] = searchTagMatch;
+      searchQuery = query.trim();
+      aiResponseText = result.text.replace(/\[SEARCH_\w+:\s*.+?\]/g, '').trim();
+      
+      if (type === 'VIDEOS') {
+        searchType = 'video';
+      } else if (type === 'ARTICLES') {
+        searchType = 'web';
+      } else if (type === 'IMAGES') {
+        searchType = 'image';
+      } else if (type === 'ALL') {
+        searchType = 'all';
+      }
+    }
+
+    // Insert the AI review response below the reviewed text
+    try {
+      const sel = window.getSelection();
+      if (!sel || !editorRef.current || !insertAfterElement) return;
+
+      const insertRange = document.createRange();
+      
+      if (insertAfterElement.parentNode) {
+        insertRange.setStartAfter(insertAfterElement);
+        insertRange.collapse(true);
+      } else {
+        insertRange.selectNodeContents(editorRef.current);
+        insertRange.collapse(false);
+      }
+
+      // Create a new paragraph for the AI response
+      const p = document.createElement('p');
+      const aiSpan = createAiTextSpan(aiResponseText);
+      p.appendChild(aiSpan);
+
+      insertRange.insertNode(p);
+
+      // Add a line break after for spacing
+      const br = document.createElement('br');
+      insertRange.setStartAfter(p);
+      insertRange.collapse(true);
+      insertRange.insertNode(br);
+
+      // Move cursor after the inserted content
+      insertRange.setStartAfter(br);
+      insertRange.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(insertRange);
+
+      // If AI suggested a search, perform it automatically
+      if (searchQuery && searchType) {
+        console.log('AI suggested search:', searchType, searchQuery);
+        setIsSearching(true);
+        
+        try {
+          let results: WebSearchResults;
+          
+          if (searchType === 'all') {
+            // Search for all types
+            results = await searchForContent(searchQuery);
+          } else if (searchType === 'video') {
+            // Search only for videos
+            const videoResults = await performWebSearch(`${searchQuery} site:youtube.com`, { type: 'video' }).catch(() => []);
+            results = parseSearchResults(searchQuery, videoResults);
+          } else if (searchType === 'web') {
+            // Search only for articles
+            const articleResults = await performWebSearch(searchQuery, { type: 'web' }).catch(() => []);
+            results = parseSearchResults(searchQuery, articleResults);
+          } else {
+            // Search only for images
+            const imageResults = await performWebSearch(searchQuery, { type: 'image' }).catch(() => []);
+            results = parseSearchResults(searchQuery, imageResults);
+          }
+
+          // Insert search results after the AI response
+          if (results.videos.length > 0 || results.articles.length > 0 || results.images.length > 0) {
+            const freshSelection = window.getSelection();
+            if (freshSelection) {
+              // Create a new range after the AI response paragraph
+              const resultsRange = document.createRange();
+              resultsRange.setStartAfter(br);
+              resultsRange.collapse(true);
+              
+              // Temporarily set selection to insert results
+              freshSelection.removeAllRanges();
+              freshSelection.addRange(resultsRange);
+              
+              await insertSearchResultsInline(results, freshSelection);
+            }
+          }
+        } catch (searchError) {
+          console.error('Auto-search failed:', searchError);
+          // Don't show error to user - search is optional
+        } finally {
+          setIsSearching(false);
+        }
+      }
+    } catch (error) {
+      setAiError('Could not insert review. ' + (error instanceof Error ? error.message : String(error)));
+    }
+
+    editorRef.current?.focus();
+  }, [setAiError, setAiLoading]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -128,11 +979,19 @@ export function DocumentEditor() {
         e.preventDefault();
         setShowShortcuts(prev => !prev);
       }
+
+      // AI Review - Ctrl/Cmd + Enter (only when editor is focused)
+      if (isEditorFocused && ctrlKey && e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleAiReview();
+        return;
+      }
     };
 
     document.addEventListener('keydown', handleKeyDown, true); // Use capture phase
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, []);
+  }, [handleAiReview]);
 
   const handleFormat = (command: string, value?: string) => {
     document.execCommand(command, false, value);
@@ -393,7 +1252,7 @@ export function DocumentEditor() {
             lines.sort((a, b) => a.top - b.top);
             
             // Find the appropriate line to snap to
-            let targetLine = null;
+            let targetLine: { top: number; bottom: number; left: number } | null = null;
             
             // First, check if we're within any line's vertical bounds
             for (const line of lines) {
@@ -871,6 +1730,17 @@ export function DocumentEditor() {
   };
 
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+    const ctrlKey = isMac ? e.metaKey : e.ctrlKey;
+
+    // AI Review - Ctrl/Cmd + Enter
+    if (ctrlKey && e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      handleAiReview();
+      return;
+    }
+
     // Handle printable characters (but not with modifiers)
     if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
       const isPrintable = e.key !== 'Enter' && e.key !== 'Tab' && e.key !== 'Escape';
@@ -911,6 +1781,31 @@ export function DocumentEditor() {
     const pastedText = e.clipboardData.getData('text/plain');
     
     if (!pastedText) return;
+
+    // If the user pastes a single URL, insert an embed preview card instead of raw text.
+    const trimmed = pastedText.trim();
+    if (isProbablyUrl(trimmed)) {
+      const card = buildLinkPreviewCard(trimmed);
+
+      // Insert as a block (avoid nesting inside spans)
+      const block = document.createElement('div');
+      block.appendChild(card);
+      const spacer = document.createElement('p');
+      spacer.appendChild(document.createElement('br'));
+      block.appendChild(spacer);
+
+      range.insertNode(block);
+
+      // Move cursor into the spacer paragraph
+      const newRange = document.createRange();
+      newRange.selectNodeContents(spacer);
+      newRange.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(newRange);
+
+      hydrateLinkPreviewCard(card, trimmed);
+      return;
+    }
     
     // Delete any selected text first
     if (!range.collapsed) {
@@ -1095,7 +1990,7 @@ export function DocumentEditor() {
 
           <div className="w-3" />
 
-          {/* AI actions — Gemini (low-cost model) */}
+          {/* AI actions � Gemini (low-cost model) */}
           <Popover>
             <PopoverTrigger asChild>
               <button
@@ -1147,6 +2042,7 @@ export function DocumentEditor() {
               )}
             </PopoverContent>
           </Popover>
+
         </div>
       </div>
 
@@ -1160,7 +2056,7 @@ export function DocumentEditor() {
                 onClick={() => setShowShortcuts(false)}
                 className="text-gray-500 hover:text-gray-700"
               >
-                ✕
+                ?
               </button>
             </div>
             <div className="space-y-2">
@@ -1207,7 +2103,7 @@ export function DocumentEditor() {
       {/* Additional Selection Highlights */}
       {additionalSelections.map((range, index) => {
         const rects = range.getClientRects();
-        return Array.from(rects).map((rect, rectIndex) => (
+        return (Array.from(rects) as DOMRect[]).map((rect, rectIndex) => (
           <div
             key={`${index}-${rectIndex}`}
             className="fixed pointer-events-none bg-blue-200/40 z-40"

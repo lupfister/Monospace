@@ -1,7 +1,9 @@
-import { useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { createHumanTextSpan, isHumanTextSpan } from '../lib/textStyles';
 
 interface MarginTextProps {
+  // Some TS setups treat `key` as a normal prop; allow it to avoid type errors.
+  key?: React.Key;
   id: string;
   content: string;
   htmlContent: string;

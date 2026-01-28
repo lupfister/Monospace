@@ -8,7 +8,7 @@
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1';
 const MODEL = 'gemini-2.0-flash';
 
-export type GeminiAction = 'summarize' | 'improve' | 'expand';
+export type GeminiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search';
 
 const getApiKey = (): string => {
   const key = import.meta.env.VITE_GEMINI_API_KEY;
@@ -25,6 +25,25 @@ const buildPrompt = (action: GeminiAction, text: string): string => {
       return `Improve clarity and grammar. Output only the improved text, no preamble:\n\n${t}`;
     case 'expand':
       return `Expand into 2–4 sentences, keeping the same tone:\n\n${t}`;
+    case 'review':
+      return `You are a helpful assistant. The user has shared some text below. Your role is to:
+
+- Answer questions directly and helpfully
+- Provide relevant knowledge and context
+- Ask thoughtful follow-up questions when appropriate
+- Be conversational and engaging
+
+After your response, if you think web search results would be helpful (videos, articles, or images), indicate what to search for by adding ONE of these tags on a new line:
+- [SEARCH_VIDEOS: query] - if YouTube videos would be helpful
+- [SEARCH_ARTICLES: query] - if articles would be helpful  
+- [SEARCH_IMAGES: query] - if images would be helpful
+- [SEARCH_ALL: query] - if multiple types would be helpful
+
+Only add a search tag if external content would genuinely add value. Be concise and helpful (2-4 sentences typically).
+
+User's text:\n\n${t}`;
+    case 'search':
+      return `Based on this text, suggest what to search for on the web to find helpful YouTube videos, images, and articles. Provide 1-3 specific search queries that would be most useful:\n\n${t}`;
     default:
       return t;
   }

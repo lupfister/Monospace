@@ -1,11 +1,12 @@
 /**
  * Minimal Gemini API client — uses REST + fetch, no SDK.
- * Model: gemini-1.5-flash (lowest cost on free tier).
+ * Uses v1 (stable) and gemini-2.0-flash. gemini-1.5-flash is not supported
+ * for generateContent on v1beta; use ListModels to see current models.
  * Keeps prompts short to minimize token usage.
  */
 
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
-const MODEL = 'gemini-1.5-flash';
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1';
+const MODEL = 'gemini-2.0-flash';
 
 export type GeminiAction = 'summarize' | 'improve' | 'expand';
 

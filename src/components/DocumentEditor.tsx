@@ -13,6 +13,7 @@ import { MarginText } from './MarginText';
 import Vector59 from '../imports/Vector59';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { generateWithGemini, type GeminiAction } from '../lib/gemini';
+import { createHumanTextSpan, createAiTextSpan, isHumanTextSpan } from '../lib/textStyles';
 
 export function DocumentEditor() {
   const editorRef = useRef<HTMLDivElement>(null);
@@ -58,6 +59,26 @@ export function DocumentEditor() {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
       const ctrlKey = isMac ? e.metaKey : e.ctrlKey;
+
+      // Check if editor is focused
+      const isEditorFocused = editorRef.current?.contains(document.activeElement);
+      
+      // Handle printable characters when editor is focused (but not with modifiers)
+      if (isEditorFocused && !ctrlKey && !e.altKey && e.key.length === 1 && !e.metaKey) {
+        // Only intercept if it's a printable character (including spaces)
+        const isPrintable = e.key.length === 1 && e.key !== 'Enter' && e.key !== 'Tab' && e.key !== 'Escape';
+        if (isPrintable) {
+          e.preventDefault();
+          e.stopPropagation();
+          
+          // Get current selection and insert styled text
+          const selection = window.getSelection();
+          if (selection && selection.rangeCount > 0 && editorRef.current) {
+            insertStyledText(e.key);
+          }
+          return;
+        }
+      }
 
       // Escape - Clear selection
       if (e.key === 'Escape') {
@@ -109,8 +130,8 @@ export function DocumentEditor() {
       }
     };
 
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleKeyDown, true); // Use capture phase
+    return () => document.removeEventListener('keydown', handleKeyDown, true);
   }, []);
 
   const handleFormat = (command: string, value?: string) => {
@@ -151,7 +172,11 @@ export function DocumentEditor() {
           sel.removeAllRanges();
           sel.addRange(r);
           r.deleteContents();
-          r.insertNode(document.createTextNode(result.text));
+          
+          // Insert AI-generated text with AI styling (gray Inter 18pt)
+          const aiSpan = createAiTextSpan(result.text);
+          r.insertNode(aiSpan);
+          
           r.collapse(false);
           sel.removeAllRanges();
           sel.addRange(r);
@@ -185,6 +210,7 @@ export function DocumentEditor() {
     if (savedContent && editorRef.current) {
       editorRef.current.innerHTML = savedContent;
     }
+    // If no saved content, the placeholder "Start writing..." is already in the JSX
   }, []);
 
   const isClickInSelection = (x: number, y: number): boolean => {
@@ -721,6 +747,235 @@ export function DocumentEditor() {
     }
   };
 
+  const insertStyledText = (text: string) => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || !editorRef.current) return;
+    
+    const range = selection.getRangeAt(0);
+    
+    // Clear placeholder if it exists and user is typing
+    if (editorRef.current) {
+      const firstChild = editorRef.current.firstElementChild;
+      if (firstChild && firstChild.tagName === 'P') {
+        const textContent = firstChild.textContent?.trim();
+        const computedStyle = window.getComputedStyle(firstChild);
+        const isGray = computedStyle.color === 'rgb(110, 110, 110)' || computedStyle.color === '#6e6e6e';
+        const isInter = computedStyle.fontFamily.includes('Inter');
+        const is18px = computedStyle.fontSize === '18px';
+        
+        if (textContent === 'Start writing...' && isGray && isInter && is18px) {
+          editorRef.current.innerHTML = '';
+          // Create a new range at the start of the editor
+          const newRange = document.createRange();
+          newRange.setStart(editorRef.current, 0);
+          newRange.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(newRange);
+          // Update the range reference
+          range.setStart(editorRef.current, 0);
+          range.collapse(true);
+        }
+      }
+    }
+    
+    // Delete any selected text first
+    if (!range.collapsed) {
+      range.deleteContents();
+    }
+    
+    // Check if we're at the end of a styled span and can append to it
+    let targetSpan: HTMLElement | null = null;
+    let canAppend = false;
+    
+    if (range.startContainer.nodeType === Node.TEXT_NODE) {
+      const textNode = range.startContainer as Text;
+      const parent = textNode.parentElement;
+      
+      if (parent && parent.tagName === 'SPAN' && isHumanTextSpan(parent)) {
+        // Check if we're at the end of the text node
+        const offset = range.startOffset;
+        const textLength = textNode.textContent?.length || 0;
+        if (offset === textLength) {
+          targetSpan = parent;
+          canAppend = true;
+        }
+      }
+    }
+    
+    // If we can append to existing styled span, do that
+    if (targetSpan && canAppend) {
+      const lastChild = targetSpan.lastChild;
+      if (lastChild && lastChild.nodeType === Node.TEXT_NODE) {
+        lastChild.textContent = (lastChild.textContent || '') + text;
+      } else {
+        targetSpan.appendChild(document.createTextNode(text));
+      }
+      
+      // Move cursor after the inserted text
+      const newRange = document.createRange();
+      newRange.selectNodeContents(targetSpan);
+      newRange.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(newRange);
+    } else {
+      // Get the computed line-height from the parent
+      const parentElement = range.startContainer.nodeType === Node.TEXT_NODE
+        ? (range.startContainer as Text).parentElement
+        : range.startContainer as HTMLElement;
+      let lineHeight = '1'; // Use 1 to minimize line height impact
+      
+      if (parentElement) {
+        const computedStyle = window.getComputedStyle(parentElement);
+        const parentLineHeight = computedStyle.lineHeight;
+        const parentFontSize = parseFloat(computedStyle.fontSize);
+        
+        // Calculate line-height that maintains the same total line height
+        if (parentLineHeight && parentFontSize && !isNaN(parentFontSize)) {
+          const lineHeightPx = parseFloat(parentLineHeight);
+          if (!isNaN(lineHeightPx)) {
+            // Calculate what line-height we need for 20px font to match parent's total line height
+            // If parent has 16px font with 1.5 line-height = 24px total
+            // We want 20px font with X line-height = 24px total
+            // So X = 24 / 20 = 1.2
+            const targetLineHeightPx = lineHeightPx; // Keep same total line height
+            const ourFontSize = 20;
+            const calculatedLineHeight = targetLineHeightPx / ourFontSize;
+            lineHeight = String(calculatedLineHeight);
+          }
+        } else if (parentLineHeight && !parentLineHeight.includes('px')) {
+          // Unitless - calculate to maintain same total height
+          const unitless = parseFloat(parentLineHeight);
+          if (!isNaN(unitless) && parentFontSize) {
+            const targetLineHeightPx = unitless * parentFontSize;
+            const ourFontSize = 20;
+            const calculatedLineHeight = targetLineHeightPx / ourFontSize;
+            lineHeight = String(calculatedLineHeight);
+          } else {
+            lineHeight = parentLineHeight;
+          }
+        }
+      }
+      
+      // Create a new span with human text styling (black Garamond 20pt)
+      const span = createHumanTextSpan(text, lineHeight);
+      
+      // Insert the styled span
+      range.insertNode(span);
+      
+      // Move cursor after the inserted text
+      range.setStartAfter(span);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+  };
+
+  const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    // Handle printable characters (but not with modifiers)
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
+      const isPrintable = e.key !== 'Enter' && e.key !== 'Tab' && e.key !== 'Escape';
+      if (isPrintable) {
+        e.preventDefault();
+        e.stopPropagation();
+        insertStyledText(e.key);
+        return;
+      }
+    }
+  };
+
+  const handleBeforeInput = (e: React.FormEvent<HTMLDivElement>) => {
+    const inputEvent = e.nativeEvent as InputEvent;
+    
+    // Only handle text insertion events
+    if (inputEvent.inputType === 'insertText' || inputEvent.inputType === 'insertCompositionText') {
+      const textToInsert = inputEvent.data || '';
+      
+      if (!textToInsert) return;
+      
+      // Prevent default insertion
+      e.preventDefault();
+      
+      // Insert with our styled handler
+      insertStyledText(textToInsert);
+    }
+  };
+
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || !editorRef.current) return;
+    
+    const range = selection.getRangeAt(0);
+    const pastedText = e.clipboardData.getData('text/plain');
+    
+    if (!pastedText) return;
+    
+    // Delete any selected text first
+    if (!range.collapsed) {
+      range.deleteContents();
+    }
+    
+    // Get the computed line-height from the parent
+    const parentElement = range.startContainer.nodeType === Node.TEXT_NODE
+      ? (range.startContainer as Text).parentElement
+      : range.startContainer as HTMLElement;
+    let lineHeight = '1'; // Use 1 to minimize line height impact
+    
+    if (parentElement) {
+      const computedStyle = window.getComputedStyle(parentElement);
+      const parentLineHeight = computedStyle.lineHeight;
+      const parentFontSize = parseFloat(computedStyle.fontSize);
+      
+      // Calculate line-height that maintains the same total line height
+      if (parentLineHeight && parentFontSize && !isNaN(parentFontSize)) {
+        const lineHeightPx = parseFloat(parentLineHeight);
+        if (!isNaN(lineHeightPx)) {
+          // Calculate what line-height we need for 20px font to match parent's total line height
+          const targetLineHeightPx = lineHeightPx; // Keep same total line height
+          const ourFontSize = 20;
+          const calculatedLineHeight = targetLineHeightPx / ourFontSize;
+          lineHeight = String(calculatedLineHeight);
+        }
+      } else if (parentLineHeight && !parentLineHeight.includes('px')) {
+        // Unitless - calculate to maintain same total height
+        const unitless = parseFloat(parentLineHeight);
+        if (!isNaN(unitless) && parentFontSize) {
+          const targetLineHeightPx = unitless * parentFontSize;
+          const ourFontSize = 20;
+          const calculatedLineHeight = targetLineHeightPx / ourFontSize;
+          lineHeight = String(calculatedLineHeight);
+        } else {
+          lineHeight = parentLineHeight;
+        }
+      }
+    }
+    
+    // Create a span with human text styling (black Garamond 20pt) for pasted text
+    const span = createHumanTextSpan('', lineHeight);
+    
+    // Preserve line breaks by converting them to <br> tags
+    const lines = pastedText.split('\n');
+    lines.forEach((line, index) => {
+      if (index > 0) {
+        span.appendChild(document.createElement('br'));
+      }
+      if (line) {
+        span.appendChild(document.createTextNode(line));
+      }
+    });
+    
+    // Insert the styled span
+    range.insertNode(span);
+    
+    // Move cursor after the pasted content
+    range.setStartAfter(span);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
   const handleMarginTextPositionChange = (id: string, x: number, y: number) => {
     setMarginTexts(prev => prev.map(m => m.id === id ? { ...m, x, y } : m));
   };
@@ -1031,15 +1286,12 @@ export function DocumentEditor() {
             spellCheck
             onMouseDown={handleMouseDown}
             onClick={handleClick}
+            onKeyDown={handleEditorKeyDown}
+            onBeforeInput={handleBeforeInput}
+            onPaste={handlePaste}
           >
-            <h1 className="font-['Georgia',serif]">Doc (computing)</h1>
-            <p className="text-[#6e6e6e]">
-              .doc (an abbreviation of "document") is a filename extension used for word processing documents stored on Microsoft's proprietary Microsoft Word Binary File Format; it was the primary format for Microsoft Word until the 2007 version replaced it with OfficeOpen XML .docx files.[4] Microsoft has used the extension since 1983.
-            </p>
-            <p>&nbsp;</p>
-            <h1 className="font-['Georgia',serif]">Glossary</h1>
-            <p className="text-[#6e6e6e]">
-              word processing documents: digital files used to create, edit, and format text.
+            <p className="text-[#6e6e6e]" style={{ fontFamily: 'Inter, sans-serif', fontSize: '18px', fontWeight: 350, fontVariationSettings: '"wght" 350' }}>
+              Start writing...
             </p>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { createHumanTextSpan, isHumanTextSpan } from '../lib/textStyles';
 
 interface MarginTextProps {
   id: string;
@@ -114,6 +115,210 @@ export function MarginText({ id, content, htmlContent, x, y, onPositionChange, o
     }
   };
 
+  const insertStyledText = (text: string) => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || !contentRef.current) return;
+    
+    const range = selection.getRangeAt(0);
+    
+    // Delete any selected text first
+    if (!range.collapsed) {
+      range.deleteContents();
+    }
+    
+    // Check if we're at the end of a styled span and can append to it
+    let targetSpan: HTMLElement | null = null;
+    let canAppend = false;
+    
+    if (range.startContainer.nodeType === Node.TEXT_NODE) {
+      const textNode = range.startContainer as Text;
+      const parent = textNode.parentElement;
+      
+      if (parent && parent.tagName === 'SPAN' && isHumanTextSpan(parent)) {
+        // Check if we're at the end of the text node
+        const offset = range.startOffset;
+        const textLength = textNode.textContent?.length || 0;
+        if (offset === textLength) {
+          targetSpan = parent;
+          canAppend = true;
+        }
+      }
+    }
+    
+    // If we can append to existing styled span, do that
+    if (targetSpan && canAppend) {
+      const lastChild = targetSpan.lastChild;
+      if (lastChild && lastChild.nodeType === Node.TEXT_NODE) {
+        lastChild.textContent = (lastChild.textContent || '') + text;
+      } else {
+        targetSpan.appendChild(document.createTextNode(text));
+      }
+      
+      // Move cursor after the inserted text
+      const newRange = document.createRange();
+      newRange.selectNodeContents(targetSpan);
+      newRange.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(newRange);
+    } else {
+      // Get the computed line-height from the parent
+      const parentElement = range.startContainer.nodeType === Node.TEXT_NODE
+        ? (range.startContainer as Text).parentElement
+        : range.startContainer as HTMLElement;
+      let lineHeight = '1'; // Use 1 to minimize line height impact
+      
+      if (parentElement) {
+        const computedStyle = window.getComputedStyle(parentElement);
+        const parentLineHeight = computedStyle.lineHeight;
+        const parentFontSize = parseFloat(computedStyle.fontSize);
+        
+        // Calculate line-height that maintains the same total line height
+        if (parentLineHeight && parentFontSize && !isNaN(parentFontSize)) {
+          const lineHeightPx = parseFloat(parentLineHeight);
+          if (!isNaN(lineHeightPx)) {
+            // Calculate what line-height we need for 20px font to match parent's total line height
+            const targetLineHeightPx = lineHeightPx; // Keep same total line height
+            const ourFontSize = 20;
+            const calculatedLineHeight = targetLineHeightPx / ourFontSize;
+            lineHeight = String(calculatedLineHeight);
+          }
+        } else if (parentLineHeight && !parentLineHeight.includes('px')) {
+          // Unitless - calculate to maintain same total height
+          const unitless = parseFloat(parentLineHeight);
+          if (!isNaN(unitless) && parentFontSize) {
+            const targetLineHeightPx = unitless * parentFontSize;
+            const ourFontSize = 20;
+            const calculatedLineHeight = targetLineHeightPx / ourFontSize;
+            lineHeight = String(calculatedLineHeight);
+          } else {
+            lineHeight = parentLineHeight;
+          }
+        }
+      }
+      
+      // Create a new span with human text styling (black Garamond 20pt)
+      const span = createHumanTextSpan(text, lineHeight);
+      
+      // Insert the styled span
+      range.insertNode(span);
+      
+      // Move cursor after the inserted text
+      range.setStartAfter(span);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+  };
+
+  const handleContentKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    // Only handle when editing
+    if (!isEditing) return;
+    
+    // Handle printable characters (but not with modifiers)
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
+      const isPrintable = e.key !== 'Enter' && e.key !== 'Tab' && e.key !== 'Escape';
+      if (isPrintable) {
+        e.preventDefault();
+        e.stopPropagation();
+        insertStyledText(e.key);
+        return;
+      }
+    }
+  };
+
+  const handleBeforeInput = (e: React.FormEvent<HTMLDivElement>) => {
+    const inputEvent = e.nativeEvent as InputEvent;
+    
+    // Only handle text insertion events
+    if (inputEvent.inputType === 'insertText' || inputEvent.inputType === 'insertCompositionText') {
+      const textToInsert = inputEvent.data || '';
+      
+      if (!textToInsert) return;
+      
+      // Prevent default insertion
+      e.preventDefault();
+      
+      // Insert with our styled handler
+      insertStyledText(textToInsert);
+    }
+  };
+
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || !contentRef.current) return;
+    
+    const range = selection.getRangeAt(0);
+    const pastedText = e.clipboardData.getData('text/plain');
+    
+    if (!pastedText) return;
+    
+    // Delete any selected text first
+    if (!range.collapsed) {
+      range.deleteContents();
+    }
+    
+    // Get the computed line-height from the parent
+    const parentElement = range.startContainer.nodeType === Node.TEXT_NODE
+      ? (range.startContainer as Text).parentElement
+      : range.startContainer as HTMLElement;
+    let lineHeight = '1'; // Use 1 to minimize line height impact
+    
+    if (parentElement) {
+      const computedStyle = window.getComputedStyle(parentElement);
+      const parentLineHeight = computedStyle.lineHeight;
+      const parentFontSize = parseFloat(computedStyle.fontSize);
+      
+      // Calculate line-height that maintains the same total line height
+      if (parentLineHeight && parentFontSize && !isNaN(parentFontSize)) {
+        const lineHeightPx = parseFloat(parentLineHeight);
+        if (!isNaN(lineHeightPx)) {
+          // Calculate what line-height we need for 20px font to match parent's total line height
+          const targetLineHeightPx = lineHeightPx; // Keep same total line height
+          const ourFontSize = 20;
+          const calculatedLineHeight = targetLineHeightPx / ourFontSize;
+          lineHeight = String(calculatedLineHeight);
+        }
+      } else if (parentLineHeight && !parentLineHeight.includes('px')) {
+        // Unitless - calculate to maintain same total height
+        const unitless = parseFloat(parentLineHeight);
+        if (!isNaN(unitless) && parentFontSize) {
+          const targetLineHeightPx = unitless * parentFontSize;
+          const ourFontSize = 20;
+          const calculatedLineHeight = targetLineHeightPx / ourFontSize;
+          lineHeight = String(calculatedLineHeight);
+        } else {
+          lineHeight = parentLineHeight;
+        }
+      }
+    }
+    
+    // Create a span with human text styling (black Garamond 20pt) for pasted text
+    const span = createHumanTextSpan('', lineHeight);
+    
+    // Preserve line breaks by converting them to <br> tags
+    const lines = pastedText.split('\n');
+    lines.forEach((line, index) => {
+      if (index > 0) {
+        span.appendChild(document.createElement('br'));
+      }
+      if (line) {
+        span.appendChild(document.createTextNode(line));
+      }
+    });
+    
+    // Insert the styled span
+    range.insertNode(span);
+    
+    // Move cursor after the pasted content
+    range.setStartAfter(span);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
   return (
     <div
       ref={elementRef}
@@ -133,6 +338,9 @@ export function MarginText({ id, content, htmlContent, x, y, onPositionChange, o
         onDoubleClick={handleContentDoubleClick}
         onClick={handleContentClick}
         onBlur={handleBlur}
+        onKeyDown={handleContentKeyDown}
+        onBeforeInput={handleBeforeInput}
+        onPaste={handlePaste}
         contentEditable={isEditing}
       />
     </div>

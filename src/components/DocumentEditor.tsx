@@ -15,8 +15,9 @@ import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { generateWithGemini, type GeminiAction } from '../lib/gemini';
 import { createHumanTextSpan, createAiTextSpan, isHumanTextSpan } from '../lib/textStyles';
 import { type WebSearchResults, parseSearchResults } from '../lib/webSearch';
-import { searchForContent, performWebSearch } from '../lib/searchAPI';
+import { getSearchCapabilities, performWebSearch } from '../lib/searchAPI';
 import { getLinkPreview, isProbablyUrl, type LinkPreviewData } from '../lib/linkPreviews';
+import { planSearchWithGemini } from '../lib/gemini';
 
 export function DocumentEditor() {
   const editorRef = useRef<HTMLDivElement>(null);
@@ -657,9 +658,107 @@ export function DocumentEditor() {
     }
   }, [setAiError]);
 
+  type SkeletonNotesBlock =
+    | { kind: 'ai'; text: string }
+    | { kind: 'input'; prompt: string; lines: number };
+
+  const parseSkeletonNotes = useCallback((rawText: string): { blocks: SkeletonNotesBlock[] } | null => {
+    const trimmed = rawText.trim();
+    if (!trimmed) return null;
+
+    // If the model appended a search tag after JSON, peel it off first.
+    const firstNewlineSearchTagIndex = trimmed.search(/\n\s*\[SEARCH_(?:VIDEOS|ARTICLES|IMAGES|ALL):/);
+    const jsonCandidate = firstNewlineSearchTagIndex >= 0 ? trimmed.slice(0, firstNewlineSearchTagIndex).trim() : trimmed;
+
+    if (!jsonCandidate.startsWith('{')) return null;
+
+    try {
+      const parsed = JSON.parse(jsonCandidate) as unknown;
+      if (!parsed || typeof parsed !== 'object') return null;
+
+      const maybeBlocks = (parsed as { blocks?: unknown }).blocks;
+      if (!Array.isArray(maybeBlocks)) return null;
+
+      const normalized: SkeletonNotesBlock[] = [];
+      for (const b of maybeBlocks) {
+        if (!b || typeof b !== 'object') continue;
+        const kind = (b as { kind?: unknown }).kind;
+        if (kind !== 'ai' && kind !== 'input') continue;
+
+        if (kind === 'ai') {
+          const text = typeof (b as { text?: unknown }).text === 'string' ? (b as { text: string }).text.trim() : '';
+          if (!text) continue;
+          normalized.push({ kind: 'ai', text });
+          continue;
+        }
+
+        const prompt = typeof (b as { prompt?: unknown }).prompt === 'string' ? (b as { prompt: string }).prompt.trim() : '';
+        const linesRaw = (b as { lines?: unknown }).lines;
+        const lines = typeof linesRaw === 'number' ? Math.floor(linesRaw) : Number(linesRaw);
+        if (!prompt) continue;
+        const safeLines = Number.isFinite(lines) ? Math.max(1, Math.min(lines, 6)) : 1;
+        normalized.push({ kind: 'input', prompt, lines: safeLines });
+      }
+
+      if (normalized.length === 0) return null;
+      return { blocks: normalized };
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const insertSkeletonNotesInline = useCallback(
+    (insertRange: Range, blocks: SkeletonNotesBlock[]): Node | null => {
+      const fragment = document.createDocumentFragment();
+      let lastNode: Node | null = null;
+
+      const createHumanBlankLine = () => {
+        const p = document.createElement('p');
+        // Non-breaking space ensures the line is visible/clickable.
+        const userSpan = createHumanTextSpan('\u00A0');
+        p.appendChild(userSpan);
+        return p;
+      };
+
+      for (const block of blocks) {
+        if (block.kind === 'ai') {
+          const p = document.createElement('p');
+          p.appendChild(createAiTextSpan(block.text));
+          fragment.appendChild(p);
+          lastNode = p;
+          continue;
+        }
+
+        // input block: gray prompt + N blank human lines
+        const promptP = document.createElement('p');
+        promptP.appendChild(createAiTextSpan(block.prompt));
+        fragment.appendChild(promptP);
+        lastNode = promptP;
+
+        for (let i = 0; i < block.lines; i += 1) {
+          const line = createHumanBlankLine();
+          fragment.appendChild(line);
+          lastNode = line;
+        }
+      }
+
+      insertRange.insertNode(fragment);
+      return lastNode;
+    },
+    []
+  );
+
   const handleAiReview = useCallback(async () => {
     const selection = window.getSelection();
     if (!selection || !editorRef.current) return;
+
+    const getEditorPlainText = (): string => {
+      const editor = editorRef.current;
+      if (!editor) return '';
+      const raw = (editor.innerText || editor.textContent || '').trim();
+      if (!raw) return '';
+      return raw.replace(/Start writing\.\.\./g, '').trim();
+    };
 
     // Get the current cursor position
     const range = selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
@@ -702,40 +801,36 @@ export function DocumentEditor() {
       // Fallback: if no block element, we need to get ALL text from the editor
       // This handles cases where text is in spans without a paragraph wrapper
       
-      // First, try to find the closest containing element that has text
+      // First, try to find the largest containing element (closest to the editor)
+      // that still contains meaningful text. The nearest element is often a tiny span
+      // (e.g. part of a word like "guins"), which makes the AI think the input is incomplete.
       let startNode: Node = range.startContainer;
-      let containingElement: HTMLElement | null = null;
+      let bestContainingElement: HTMLElement | null = null;
       
-      // Walk up to find any element that contains text
+      // Walk up and keep the highest-level element with meaningful text.
       let current: Node | null = startNode;
       while (current && current !== editorRef.current) {
         if (current.nodeType === Node.ELEMENT_NODE) {
           const el = current as HTMLElement;
           const textContent = el.textContent?.trim() || '';
           if (textContent && textContent !== 'Start writing...') {
-            containingElement = el;
-            break;
+            bestContainingElement = el;
           }
         }
         current = current.parentNode;
       }
       
-      if (containingElement) {
+      if (bestContainingElement) {
         // Get all text from this containing element
         const textRange = document.createRange();
-        textRange.selectNodeContents(containingElement);
+        textRange.selectNodeContents(bestContainingElement);
         textToReview = textRange.toString().trim();
-        insertAfterElement = containingElement;
+        insertAfterElement = bestContainingElement;
       } else {
         // Last resort: get ALL text from the entire editor (excluding placeholder)
         // This ensures we get the full sentence even if structure is complex
         // Use innerText or textContent to get all text in document order
-        let allText = editorRef.current.innerText || editorRef.current.textContent || '';
-        
-        // Remove placeholder text if present
-        allText = allText.replace(/Start writing\.\.\./g, '').trim();
-        
-        textToReview = allText;
+        textToReview = getEditorPlainText();
         
         // Find the last element with text to insert after
         const walker = document.createTreeWalker(
@@ -779,6 +874,14 @@ export function DocumentEditor() {
       }
     }
 
+    // If we somehow captured only a fragment (common with styled spans),
+    // fall back to the full editor text to avoid incomplete prompts.
+    const fullEditorText = getEditorPlainText();
+    if (textToReview.length > 0 && textToReview.length < 20 && fullEditorText.length > textToReview.length) {
+      textToReview = fullEditorText;
+      insertAfterElement = editorRef.current;
+    }
+
     if (!textToReview || textToReview === 'Start writing...') {
       setAiError('No text found to review. Please write something first.');
       return;
@@ -795,27 +898,10 @@ export function DocumentEditor() {
       return;
     }
 
-    // Parse AI response for search tags
-    const searchTagMatch = result.text.match(/\[SEARCH_(VIDEOS|ARTICLES|IMAGES|ALL):\s*(.+?)\]/);
-    let aiResponseText = result.text;
-    let searchQuery: string | null = null;
-    let searchType: 'video' | 'web' | 'image' | 'all' | null = null;
+    const skeleton = parseSkeletonNotes(result.text);
 
-    if (searchTagMatch) {
-      const [, type, query] = searchTagMatch;
-      searchQuery = query.trim();
-      aiResponseText = result.text.replace(/\[SEARCH_\w+:\s*.+?\]/g, '').trim();
-      
-      if (type === 'VIDEOS') {
-        searchType = 'video';
-      } else if (type === 'ARTICLES') {
-        searchType = 'web';
-      } else if (type === 'IMAGES') {
-        searchType = 'image';
-      } else if (type === 'ALL') {
-        searchType = 'all';
-      }
-    }
+    // Keep the user-facing response clean; search is planned separately (agentic flow).
+    const aiResponseText = result.text.replace(/\[SEARCH_\w+:\s*.+?\]/g, '').trim();
 
     // Insert the AI review response below the reviewed text
     try {
@@ -832,16 +918,24 @@ export function DocumentEditor() {
         insertRange.collapse(false);
       }
 
-      // Create a new paragraph for the AI response
-      const p = document.createElement('p');
-      const aiSpan = createAiTextSpan(aiResponseText);
-      p.appendChild(aiSpan);
+      let lastInsertedNode: Node | null = null;
 
-      insertRange.insertNode(p);
+      if (skeleton) {
+        lastInsertedNode = insertSkeletonNotesInline(insertRange, skeleton.blocks);
+      } else {
+        // Fallback: a single paragraph for the AI response (previous behavior)
+        const p = document.createElement('p');
+        const aiSpan = createAiTextSpan(aiResponseText);
+        p.appendChild(aiSpan);
+        insertRange.insertNode(p);
+        lastInsertedNode = p;
+      }
 
       // Add a line break after for spacing
       const br = document.createElement('br');
-      insertRange.setStartAfter(p);
+      if (lastInsertedNode) {
+        insertRange.setStartAfter(lastInsertedNode);
+      }
       insertRange.collapse(true);
       insertRange.insertNode(br);
 
@@ -851,53 +945,90 @@ export function DocumentEditor() {
       sel.removeAllRanges();
       sel.addRange(insertRange);
 
-      // If AI suggested a search, perform it automatically
-      if (searchQuery && searchType) {
-        console.log('AI suggested search:', searchType, searchQuery);
-        setIsSearching(true);
-        
-        try {
-          let results: WebSearchResults;
-          
-          if (searchType === 'all') {
-            // Search for all types
-            results = await searchForContent(searchQuery);
-          } else if (searchType === 'video') {
-            // Search only for videos
-            const videoResults = await performWebSearch(`${searchQuery} site:youtube.com`, { type: 'video' }).catch(() => []);
-            results = parseSearchResults(searchQuery, videoResults);
-          } else if (searchType === 'web') {
-            // Search only for articles
-            const articleResults = await performWebSearch(searchQuery, { type: 'web' }).catch(() => []);
-            results = parseSearchResults(searchQuery, articleResults);
-          } else {
-            // Search only for images
-            const imageResults = await performWebSearch(searchQuery, { type: 'image' }).catch(() => []);
-            results = parseSearchResults(searchQuery, imageResults);
-          }
+      // Agentic retrieval: decide whether to search, then execute searches.
+      setIsSearching(true);
+      try {
+        const caps = getSearchCapabilities();
+        let plan = await planSearchWithGemini(`${textToReview}\n\nAssistant response:\n${aiResponseText}`);
 
-          // Insert search results after the AI response
-          if (results.videos.length > 0 || results.articles.length > 0 || results.images.length > 0) {
-            const freshSelection = window.getSelection();
-            if (freshSelection) {
-              // Create a new range after the AI response paragraph
-              const resultsRange = document.createRange();
-              resultsRange.setStartAfter(br);
-              resultsRange.collapse(true);
-              
-              // Temporarily set selection to insert results
-              freshSelection.removeAllRanges();
-              freshSelection.addRange(resultsRange);
-              
-              await insertSearchResultsInline(results, freshSelection);
-            }
-          }
-        } catch (searchError) {
-          console.error('Auto-search failed:', searchError);
-          // Don't show error to user - search is optional
-        } finally {
-          setIsSearching(false);
+        // Heuristic fallback: if the user is clearly asking for external media but
+        // the model declined to search, force a simple search plan so it "just works".
+        const lower = textToReview.toLowerCase();
+        const wantsImages =
+          lower.includes('image') ||
+          lower.includes('images') ||
+          lower.includes('picture') ||
+          lower.includes('pictures') ||
+          lower.includes('photo') ||
+          lower.includes('photos');
+        const wantsVideos =
+          lower.includes('video') ||
+          lower.includes('videos') ||
+          lower.includes('youtube');
+
+        if ((!plan.shouldSearch || plan.queries.length === 0) && (wantsImages || wantsVideos)) {
+          plan = {
+            shouldSearch: true,
+            queries: [
+              {
+                type: wantsImages ? 'image' : 'video',
+                query: textToReview.trim(),
+                reason: 'User explicitly asked for visual content; perform a direct search.',
+              },
+            ],
+          };
         }
+
+        if (!plan.shouldSearch || plan.queries.length === 0) return;
+
+        // If the model wants search but no providers are configured, surface a clear message.
+        if (!caps.hasGeminiKey && !caps.hasPexelsKey) {
+          setAiError(
+            'Search is not configured. Add `VITE_GEMINI_API_KEY` (web/videos via Google grounding) and/or `VITE_PEXELS_API_KEY` (images/videos) to your `.env`, then restart the dev server.'
+          );
+          return;
+        }
+
+        const combined: WebSearchResults = { videos: [], images: [], articles: [] };
+        for (const q of plan.queries) {
+          const raw = await performWebSearch(q.query, { type: q.type }).catch(() => []);
+          const parsed = parseSearchResults(q.query, raw);
+          combined.videos.push(...parsed.videos);
+          combined.images.push(...parsed.images);
+          combined.articles.push(...parsed.articles);
+        }
+
+        const hasAny =
+          combined.videos.length > 0 || combined.images.length > 0 || combined.articles.length > 0;
+        if (!hasAny) {
+          // If keys exist but we still got nothing, give a lightweight hint instead of silence.
+          if (!caps.hasGeminiKey && caps.hasPexelsKey) {
+            setAiError('No results returned. Pexels is configured; Gemini web search is not. Add `VITE_GEMINI_API_KEY` for web/article/YouTube results.');
+            return;
+          }
+          if (caps.hasGeminiKey && !caps.hasPexelsKey) {
+            setAiError('No image results returned. For image searches, add `VITE_PEXELS_API_KEY` to your `.env` file (free at https://www.pexels.com/api/). Gemini\'s grounded search returns web pages, not direct image URLs.');
+            return;
+          }
+          setAiError('No search results returned. Check your API keys and network access, then try again.');
+          return;
+        }
+
+        const freshSelection = window.getSelection();
+        if (!freshSelection) return;
+
+        const resultsRange = document.createRange();
+        resultsRange.setStartAfter(br);
+        resultsRange.collapse(true);
+        freshSelection.removeAllRanges();
+        freshSelection.addRange(resultsRange);
+
+        await insertSearchResultsInline(combined, freshSelection);
+      } catch (searchError) {
+        console.error('Auto-search failed:', searchError);
+        // Search is optional; keep UX silent.
+      } finally {
+        setIsSearching(false);
       }
     } catch (error) {
       setAiError('Could not insert review. ' + (error instanceof Error ? error.message : String(error)));
@@ -1775,12 +1906,63 @@ export function DocumentEditor() {
     e.preventDefault();
     
     const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || !editorRef.current) return;
-    
-    const range = selection.getRangeAt(0);
+    if (!selection || !editorRef.current) return;
+
     const pastedText = e.clipboardData.getData('text/plain');
     
     if (!pastedText) return;
+
+    // Append pasted content after the last *meaningful* node (ignore trailing empty lines/blocks)
+    const editorElement = editorRef.current;
+    const getLastMeaningfulNode = (): Node | null => {
+      let current: ChildNode | null = editorElement.lastChild;
+
+      while (current) {
+        if (current.nodeType === Node.TEXT_NODE) {
+          const text = current.textContent ?? '';
+          if (text.trim() !== '') return current;
+          current = current.previousSibling;
+          continue;
+        }
+
+        if (current.nodeType === Node.ELEMENT_NODE) {
+          const el = current as HTMLElement;
+          const tag = el.tagName.toUpperCase();
+
+          // Ignore pure <br> nodes
+          if (tag === 'BR') {
+            current = current.previousSibling;
+            continue;
+          }
+
+          // Ignore placeholder or empty paragraphs/spacers at the end
+          const text = (el.textContent ?? '').replace(/\u200B/g, '').trim();
+          const hasMedia = Boolean(el.querySelector?.('img,video,iframe,svg,canvas'));
+          const isPlaceholder = text === 'Start writing...';
+          const isEmptyParagraph = tag === 'P' && !hasMedia && text === '';
+
+          if (isPlaceholder || isEmptyParagraph || (!hasMedia && text === '')) {
+            current = current.previousSibling;
+            continue;
+          }
+
+          return el;
+        }
+
+        current = current.previousSibling;
+      }
+
+      return null;
+    };
+
+    const insertAfterNode = getLastMeaningfulNode();
+    const range = document.createRange();
+    if (insertAfterNode) {
+      range.setStartAfter(insertAfterNode);
+    } else {
+      range.setStart(editorElement, 0);
+    }
+    range.collapse(true);
 
     // If the user pastes a single URL, insert an embed preview card instead of raw text.
     const trimmed = pastedText.trim();
@@ -1796,20 +1978,15 @@ export function DocumentEditor() {
 
       range.insertNode(block);
 
-      // Move cursor into the spacer paragraph
+      // Move cursor to the end after the inserted block
       const newRange = document.createRange();
-      newRange.selectNodeContents(spacer);
+      newRange.setStartAfter(block);
       newRange.collapse(true);
       selection.removeAllRanges();
       selection.addRange(newRange);
 
       hydrateLinkPreviewCard(card, trimmed);
       return;
-    }
-    
-    // Delete any selected text first
-    if (!range.collapsed) {
-      range.deleteContents();
     }
     
     // Get the computed line-height from the parent
@@ -1864,11 +2041,12 @@ export function DocumentEditor() {
     // Insert the styled span
     range.insertNode(span);
     
-    // Move cursor after the pasted content
-    range.setStartAfter(span);
-    range.collapse(true);
+    // Move cursor to the end after the pasted content
+    const newRange = document.createRange();
+    newRange.setStartAfter(span);
+    newRange.collapse(true);
     selection.removeAllRanges();
-    selection.addRange(range);
+    selection.addRange(newRange);
   };
 
   const handleMarginTextPositionChange = (id: string, x: number, y: number) => {

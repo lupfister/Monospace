@@ -60,22 +60,6 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3000,
       open: true,
-      proxy: {
-        '/api/brave': {
-          target: 'https://api.search.brave.com',
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api\/brave/, ''),
-          configure: (proxy, _options) => {
-            proxy.on('proxyReq', (proxyReq, req, _res) => {
-              // Forward the API key from environment variable
-              const apiKey = env.VITE_BRAVE_API_KEY;
-              if (apiKey) {
-                proxyReq.setHeader('X-Subscription-Token', apiKey);
-              }
-            });
-          },
-        },
-      },
     },
   };
 });

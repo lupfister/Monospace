@@ -32,6 +32,9 @@ export interface WebSearchResults {
   articles: Article[];
 }
 
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === 'string' && value.trim().length > 0;
+
 /**
  * Extract YouTube video ID from URL
  */
@@ -76,19 +79,22 @@ export const parseSearchResults = (
   const articles: Article[] = [];
 
   for (const result of rawResults) {
-    if (!result.url || !result.title) continue;
+    const url = isNonEmptyString(result.url) ? result.url.trim() : '';
+    const title = isNonEmptyString(result.title) ? result.title.trim() : '';
+    const snippet = isNonEmptyString(result.snippet) ? result.snippet.trim() : '';
+    const thumbnail = isNonEmptyString(result.thumbnail) ? result.thumbnail.trim() : '';
 
-    const url = result.url;
-    const title = result.title;
-    const snippet = result.snippet || '';
-    const thumbnail = result.thumbnail || '';
+    // Some providers (e.g. Pexels) return a page URL in `url` and the actual image in `thumbnail`.
+    // Require at least a URL. For images we can fall back to thumbnail when `url` isn't a direct asset.
+    if (!url) continue;
+    const effectiveTitle = title || url;
 
     // Check if it's a YouTube video
     if (isYouTubeUrl(url)) {
       const videoId = extractYouTubeId(url);
       if (videoId) {
         videos.push({
-          title,
+          title: effectiveTitle,
           url,
           snippet,
           thumbnail: thumbnail || `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
@@ -98,13 +104,16 @@ export const parseSearchResults = (
       continue;
     }
 
-    // Check if it's an image
-    if (isImageUrl(url)) {
+    // Check if it's an image (direct asset URL or provider thumbnail)
+    const imageAssetUrl =
+      isImageUrl(url) ? url : (thumbnail && isImageUrl(thumbnail) ? thumbnail : '');
+    if (imageAssetUrl) {
       images.push({
-        title,
+        title: effectiveTitle,
+        // Keep the "click-through" URL if it's a page; otherwise it's the asset itself.
         url,
         snippet,
-        thumbnail: url,
+        thumbnail: imageAssetUrl,
       });
       continue;
     }
@@ -120,7 +129,7 @@ export const parseSearchResults = (
     }
     
     articles.push({
-      title,
+      title: effectiveTitle,
       url,
       snippet,
       thumbnail,

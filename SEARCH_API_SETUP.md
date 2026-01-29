@@ -4,21 +4,17 @@ The web search feature is now integrated into the document editor with **FREE AP
 
 ## 🆓 Free API Options (Recommended)
 
-### Option 1: Brave Search API ⭐ (Best for General Search)
-**Free Tier: 2,000 queries/month**
-
-1. Sign up at [Brave Search API](https://brave.com/search/api/)
-2. Get your API key (free tier available)
-3. Add to your `.env` file:
+### Option 1: Gemini API ⭐ (Best for Web & YouTube)
+1. Create an API key at https://aistudio.google.com/apikey
+2. Add to your `.env` file:
 ```
-VITE_BRAVE_API_KEY=your_api_key_here
+VITE_GEMINI_API_KEY=your_api_key_here
 ```
 
 **Pros:**
-- Independent web index (not Google-dependent)
+- Single API for AI + web grounding
 - Great for AI applications
-- 2,000 free queries/month
-- Supports web, images, and videos
+- Works well for articles + YouTube links
 
 ### Option 2: Pexels API ⭐ (Best for Images & Videos)
 **Completely FREE - No limits for standard usage**
@@ -36,26 +32,10 @@ VITE_PEXELS_API_KEY=your_api_key_here
 - No credit card required
 - Perfect for visual content
 
-### Option 3: Search1API
-**Free Tier: 100 credits, no credit card required**
-
-1. Sign up at [Search1API](https://www.search1api.com/)
-2. Get your API key
-3. Add to your `.env` file:
-```
-VITE_SEARCH1API_KEY=your_api_key_here
-```
-
-**Pros:**
-- 100 free credits to start
-- No credit card required
-- Supports multiple search engines (Google, Bing, DuckDuckGo, YouTube, etc.)
-- Fast response times
-
 ## 🎯 Recommended Setup
 
 For the best free experience, use **both**:
-1. **Brave Search API** for web articles and YouTube videos
+1. **Gemini API** for web articles and YouTube videos
 2. **Pexels API** for high-quality images and videos
 
 The implementation automatically uses the best available API for each content type!

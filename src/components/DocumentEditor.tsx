@@ -12,12 +12,11 @@ import {
 import { MarginText } from './MarginText';
 import Vector59 from '../imports/Vector59';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
-import { generateWithGemini, type GeminiAction } from '../lib/gemini';
+import { generateWithGemini, type GeminiAction, planSearchWithGemini } from '../lib/openaiAgentApi';
 import { createHumanTextSpan, createAiTextSpan, isHumanTextSpan } from '../lib/textStyles';
 import { type WebSearchResults, parseSearchResults } from '../lib/webSearch';
 import { getSearchCapabilities, performWebSearch } from '../lib/searchAPI';
 import { getLinkPreview, isProbablyUrl, type LinkPreviewData } from '../lib/linkPreviews';
-import { planSearchWithGemini } from '../lib/gemini';
 
 export function DocumentEditor() {
   const editorRef = useRef<HTMLDivElement>(null);
@@ -720,12 +719,34 @@ export function DocumentEditor() {
         return p;
       };
 
-      for (const block of blocks) {
+      for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        const nextBlock = i < blocks.length - 1 ? blocks[i + 1] : null;
+
         if (block.kind === 'ai') {
           const p = document.createElement('p');
           p.appendChild(createAiTextSpan(block.text));
           fragment.appendChild(p);
           lastNode = p;
+
+          // Detect if this is a label (short text, typically single word/phrase)
+          // Labels don't need a gap below them.
+          const isLabel = block.text.length < 60 && 
+            !block.text.trim().match(/[.!?]$/);
+
+          // Only add a gap if:
+          // 1. It's not a label, AND
+          // 2. The next block is either null (last block) or an input block (not another AI block)
+          // This ensures consecutive AI blocks (like multiple summary sentences) stay together
+          const shouldAddGap = !isLabel && (nextBlock === null || nextBlock.kind === 'input');
+
+          if (shouldAddGap) {
+            // Regular AI outputs (e.g. summary content) should have
+            // **one blank line** below them, but only after the last AI block in a sequence.
+            const gap = createHumanBlankLine();
+            fragment.appendChild(gap);
+            lastNode = gap;
+          }
           continue;
         }
 
@@ -739,6 +760,17 @@ export function DocumentEditor() {
           const line = createHumanBlankLine();
           fragment.appendChild(line);
           lastNode = line;
+        }
+
+        // Questions for the user should have **exactly two gaps** below them:
+        // - the gap(s) for the user's response (the blank lines we just added)
+        // - one regular spacing gap before the next content
+        // Only add the extra gap if we only have 1 answer line, otherwise
+        // the multiple answer lines already provide enough spacing.
+        if (block.lines === 1) {
+          const extraGap = createHumanBlankLine();
+          fragment.appendChild(extraGap);
+          lastNode = extraGap;
         }
       }
 
@@ -759,6 +791,14 @@ export function DocumentEditor() {
       if (!raw) return '';
       return raw.replace(/Start writing\.\.\./g, '').trim();
     };
+
+    // Always get the full editor text for context
+    const fullEditorText = getEditorPlainText();
+    
+    if (!fullEditorText || fullEditorText === 'Start writing...') {
+      setAiError('No text found to review. Please write something first.');
+      return;
+    }
 
     // Get the current cursor position
     const range = selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
@@ -787,23 +827,18 @@ export function DocumentEditor() {
       current = current.parentNode;
     }
 
-    // Get text to review from the block element
-    let textToReview = '';
+    // Get the text at the cursor position (the "new" text to focus on)
+    let newTextAtCursor = '';
     let insertAfterElement: Node | null = null;
 
     if (blockElement) {
       // Get all text from the block element
       const textRange = document.createRange();
       textRange.selectNodeContents(blockElement);
-      textToReview = textRange.toString().trim();
+      newTextAtCursor = textRange.toString().trim();
       insertAfterElement = blockElement;
     } else {
-      // Fallback: if no block element, we need to get ALL text from the editor
-      // This handles cases where text is in spans without a paragraph wrapper
-      
-      // First, try to find the largest containing element (closest to the editor)
-      // that still contains meaningful text. The nearest element is often a tiny span
-      // (e.g. part of a word like "guins"), which makes the AI think the input is incomplete.
+      // Fallback: if no block element, try to find the containing element
       let startNode: Node = range.startContainer;
       let bestContainingElement: HTMLElement | null = null;
       
@@ -824,13 +859,11 @@ export function DocumentEditor() {
         // Get all text from this containing element
         const textRange = document.createRange();
         textRange.selectNodeContents(bestContainingElement);
-        textToReview = textRange.toString().trim();
+        newTextAtCursor = textRange.toString().trim();
         insertAfterElement = bestContainingElement;
       } else {
-        // Last resort: get ALL text from the entire editor (excluding placeholder)
-        // This ensures we get the full sentence even if structure is complex
-        // Use innerText or textContent to get all text in document order
-        textToReview = getEditorPlainText();
+        // Use the full editor text as fallback
+        newTextAtCursor = fullEditorText;
         
         // Find the last element with text to insert after
         const walker = document.createTreeWalker(
@@ -875,16 +908,21 @@ export function DocumentEditor() {
     }
 
     // If we somehow captured only a fragment (common with styled spans),
-    // fall back to the full editor text to avoid incomplete prompts.
-    const fullEditorText = getEditorPlainText();
-    if (textToReview.length > 0 && textToReview.length < 20 && fullEditorText.length > textToReview.length) {
-      textToReview = fullEditorText;
+    // use the full editor text as the new text too.
+    if (newTextAtCursor.length > 0 && newTextAtCursor.length < 20 && fullEditorText.length > newTextAtCursor.length) {
+      newTextAtCursor = fullEditorText;
       insertAfterElement = editorRef.current;
     }
 
-    if (!textToReview || textToReview === 'Start writing...') {
-      setAiError('No text found to review. Please write something first.');
-      return;
+    // Construct the prompt with full context and highlighted new text
+    // Format: include full context, but mark the new text so AI knows to focus on it
+    let textToReview: string;
+    if (newTextAtCursor && newTextAtCursor !== fullEditorText && fullEditorText.includes(newTextAtCursor)) {
+      // The new text is part of the full context - format it to highlight it
+      textToReview = `Full document context:\n${fullEditorText}\n\n---\n\nFocus on this newly written text (the user just wrote this):\n${newTextAtCursor}`;
+    } else {
+      // If they're the same or new text not found in full context, just use full context
+      textToReview = fullEditorText;
     }
 
     setAiError(null);
@@ -918,32 +956,34 @@ export function DocumentEditor() {
         insertRange.collapse(false);
       }
 
+      // Always insert a single gap line **below the user's input**
+      // before any AI-generated content.
+      const preGap = document.createElement('p');
+      const preGapSpan = createHumanTextSpan('\u00A0');
+      preGap.appendChild(preGapSpan);
+      insertRange.insertNode(preGap);
+      insertRange.setStartAfter(preGap);
+      insertRange.collapse(true);
+
       let lastInsertedNode: Node | null = null;
 
       if (skeleton) {
         lastInsertedNode = insertSkeletonNotesInline(insertRange, skeleton.blocks);
       } else {
-        // Fallback: a single paragraph for the AI response (previous behavior)
-        const p = document.createElement('p');
-        const aiSpan = createAiTextSpan(aiResponseText);
-        p.appendChild(aiSpan);
-        insertRange.insertNode(p);
-        lastInsertedNode = p;
+        // Fallback: treat the whole response as a single AI block
+        const syntheticBlocks: SkeletonNotesBlock[] = [
+          { kind: 'ai', text: aiResponseText },
+        ];
+        lastInsertedNode = insertSkeletonNotesInline(insertRange, syntheticBlocks);
       }
 
-      // Add a line break after for spacing
-      const br = document.createElement('br');
+      // Move cursor after the last inserted node
       if (lastInsertedNode) {
         insertRange.setStartAfter(lastInsertedNode);
+        insertRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(insertRange);
       }
-      insertRange.collapse(true);
-      insertRange.insertNode(br);
-
-      // Move cursor after the inserted content
-      insertRange.setStartAfter(br);
-      insertRange.collapse(true);
-      sel.removeAllRanges();
-      sel.addRange(insertRange);
 
       // Agentic retrieval: decide whether to search, then execute searches.
       setIsSearching(true);
@@ -1017,8 +1057,9 @@ export function DocumentEditor() {
         const freshSelection = window.getSelection();
         if (!freshSelection) return;
 
+        if (!lastInsertedNode) return;
         const resultsRange = document.createRange();
-        resultsRange.setStartAfter(br);
+        resultsRange.setStartAfter(lastInsertedNode);
         resultsRange.collapse(true);
         freshSelection.removeAllRanges();
         freshSelection.addRange(resultsRange);

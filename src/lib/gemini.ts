@@ -72,7 +72,52 @@ const buildPrompt = (action: GeminiAction, text: string): string => {
     case 'expand':
       return `Expand into 2–4 sentences, keeping the same tone:\n\n${t}`;
     case 'review':
-      return `You are writing "skeleton notes" for a document editor.
+      // Check if the text includes the special format with full context and new text
+      const hasContextFormat = t.includes('Full document context:') && t.includes('Focus on this newly written text');
+      
+      if (hasContextFormat) {
+        return `You are writing "skeleton notes" for a document editor.
+
+The user has provided:
+1. Full document context (the entire conversation/document so far)
+2. Newly written text (the specific text they just wrote, marked with "Focus on this newly written text")
+
+CRITICAL INSTRUCTIONS:
+- The document ALREADY EXISTS with previous content, summaries, and questions
+- DO NOT regenerate or repeat existing content
+- DO NOT create a new "Summary" section if one already exists in the context
+- DO NOT repeat questions that were already asked
+- Focus ONLY on responding to the newly written text in the context of what already exists
+- If the newly written text is a question or needs clarification, provide a direct answer or follow-up question
+- If the newly written text adds new information, integrate it contextually (e.g., if they mention "funny eyebrows", provide information about which penguins have that feature)
+- Only add NEW content that builds on what's already there
+
+Output MUST be valid JSON only (no markdown, no code fences, no commentary) matching this TypeScript type:
+type Block =
+  | { kind: "ai"; text: string }
+  | { kind: "input"; prompt: string; lines: number };
+type Output = { blocks: Block[] };
+
+Rules:
+- Keep AI text short and scannable (headings + 1–2 concise sentences, or short bullet-like lines)
+- Use "input" blocks ONLY for NEW questions or prompts that aren't already in the document
+- For input blocks: prompt is shown in gray; then render exactly "lines" empty user lines to fill in (use 1–4)
+- Add 1–3 blocks that directly respond to the newly written text
+- If the newly written text asks a question, provide an answer (as an "ai" block) or a clarifying follow-up question (as an "input" block)
+- Keep total blocks <= 5 (since this is incremental, not a full document)
+- DO NOT include a "Summary" block unless the document context shows there isn't one already
+
+After the JSON, if you think web search results would be helpful, append ONE tag on a new line (outside JSON):
+- [SEARCH_VIDEOS: query]
+- [SEARCH_ARTICLES: query]
+- [SEARCH_IMAGES: query]
+- [SEARCH_ALL: query]
+Only add a tag if external content would genuinely add value.
+
+User's text:
+${t}`;
+      } else {
+        return `You are writing "skeleton notes" for a document editor.
 
 Output MUST be valid JSON only (no markdown, no code fences, no commentary) matching this TypeScript type:
 type Block =
@@ -97,6 +142,7 @@ Only add a tag if external content would genuinely add value.
 
 User's text:
 ${t}`;
+      }
     case 'search':
       return `Based on this text, suggest what to search for on the web to find helpful YouTube videos, images, and articles. Provide 1-3 specific search queries that would be most useful:\n\n${t}`;
     default:

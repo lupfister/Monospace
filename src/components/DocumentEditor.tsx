@@ -513,12 +513,33 @@ export function DocumentEditor() {
         if (imageUrl) {
           const img = document.createElement('img');
           const proxyUrl = `/api/ai/image?url=${encodeURIComponent(imageUrl)}`;
+          // Set proxy URL both as dataset (for hydrate/fallback) and initial src so the browser attempts to load it immediately.
           img.dataset.proxyUrl = proxyUrl;
+          img.src = proxyUrl;
           if (item.url) img.dataset.fallbackUrl = item.url;
           img.alt = item.title || (item.type === 'video' ? 'Video thumbnail' : 'Image');
           img.className = resultCardClasses.image;
           img.style.minHeight = '120px';
           img.style.backgroundColor = 'var(--color-gray-100, #f3f4f6)';
+          img.loading = 'lazy';
+
+          // On error, replace image with a fallback link or note.
+          img.onerror = () => {
+            const figure = img.closest('figure') || img.parentElement;
+            const fallbackUrl = img.dataset.fallbackUrl || (figure?.dataset.fallbackUrl || '');
+            const fallback = document.createElement('div');
+            if (fallbackUrl) {
+              const imgLabel = img.alt ? `Open image: ${img.alt}` : 'Open image';
+              fallback.appendChild(createLinkRow(fallbackUrl, imgLabel));
+            } else {
+              fallback.appendChild(createAiTextSpan('Image unavailable'));
+            }
+            if (img.parentNode) {
+              img.parentNode.insertBefore(fallback, img);
+            }
+            img.remove();
+          };
+
           container.appendChild(img);
         }
         if (item.url) {
@@ -1001,23 +1022,15 @@ export function DocumentEditor() {
       textToReview = fullEditorText;
     }
 
+    // New flow: plan + run searches first, build a concise search-summary (no raw URLs),
+    // then call the review generation so the AI info paragraph can incorporate findings.
     setAiError(null);
     setAiLoading(true);
 
-    const result = await generateWithGemini('review', textToReview, selectedModel);
-
-    if (!result.ok) {
-      setAiError(result.error);
-      setAiLoading(false);
-      return;
-    }
-
-    const skeleton = parseSkeletonNotes(result.text);
-
-    const aiResponseText = result.text.replace(/\[SEARCH_\w+:\s*.+?\]/g, '').trim();
-
-    // Run search first so we can place results right after the user's paragraph (within document flow).
     let inlineItems: ResultItem[] = [];
+    let skeleton: { blocks: any[] } | null = null;
+    let aiResponseText: string = '';
+
     const ensureCoverageQueries = (
       plan: GeminiSearchPlan,
       baseQuery: string,
@@ -1044,26 +1057,13 @@ export function DocumentEditor() {
         reason: 'Provide a deeper, text-based source.',
       };
 
-      // Order: images and videos first (media), then web/articles (information).
       return { shouldSearch: true, queries: [imageQuery, videoQuery, webQuery].slice(0, 3) };
     };
 
     setIsSearching(true);
     try {
-      let plan = await planSearchWithGemini(`${textToReview}\n\nAssistant response:\n${aiResponseText}`, selectedModel);
-
-      const lower = textToReview.toLowerCase();
-      const wantsImages =
-        lower.includes('image') ||
-        lower.includes('images') ||
-        lower.includes('picture') ||
-        lower.includes('pictures') ||
-        lower.includes('photo') ||
-        lower.includes('photos');
-      const wantsVideos =
-        lower.includes('video') ||
-        lower.includes('videos') ||
-        lower.includes('youtube');
+      // 1) Plan searches based on the user's text (before AI review)
+      let plan = await planSearchWithGemini(textToReview, selectedModel);
 
       if (!plan.shouldSearch || plan.queries.length === 0) {
         plan = ensureCoverageQueries({ shouldSearch: true, queries: [] }, textToReview);
@@ -1071,6 +1071,7 @@ export function DocumentEditor() {
         plan = ensureCoverageQueries(plan, textToReview);
       }
 
+      // 2) Execute agent searches (if any) and normalize to inlineItems for insertion
       if (plan.shouldSearch && plan.queries.length > 0) {
         const agentQueries: AgentSearchRequest[] = plan.queries.map((q) => ({
           type: q.type === 'web' ? 'article' : (q.type as AgentSearchResult['type']),
@@ -1078,11 +1079,119 @@ export function DocumentEditor() {
         }));
         const agentResults = await searchWithAgent(agentQueries, selectedModel);
         const items = orderedSearchResultsToItems(agentResults);
-        // Order: images and video embeds first, then articles (information with links).
         const mediaFirstOrder: ResultItemType[] = ['image', 'video', 'article', 'snippet'];
-        inlineItems = [...items].sort(
+        // Sort and dedupe by url (prefer first occurrence)
+        const sorted = [...items].sort(
           (a, b) => mediaFirstOrder.indexOf(a.type) - mediaFirstOrder.indexOf(b.type)
         );
+        const seen = new Set<string>();
+        inlineItems = [];
+        for (const it of sorted) {
+          const key = (it.url || it.title || '').trim();
+          if (!key) continue;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          inlineItems.push(it);
+        }
+      }
+
+      // 3) Build a concise search-summary for the reviewer model (no raw URLs, only titles/snippets/types)
+      const summaryParts: string[] = [];
+      const mediaPreview = inlineItems.find((it) => it.type === 'image' || it.type === 'video');
+      if (mediaPreview) {
+        summaryParts.push(`${mediaPreview.type.toUpperCase()}: ${mediaPreview.title || mediaPreview.snippet || ''}`.trim());
+      }
+      const infoItems = inlineItems.filter((it) => it.type === 'article').slice(0, 4);
+      for (const it of infoItems) {
+        const line = it.snippet ? `${it.title}: ${it.snippet}` : it.title;
+        summaryParts.push(line);
+      }
+
+      const searchSummaryForAI = summaryParts.join('\n').trim();
+
+      // 4) Call the reviewer generation with search findings appended so the info paragraph can use them.
+      // Instruct model: no raw URLs in output. We include the searchSummary but ensure it contains no urls.
+      const reviewInput = searchSummaryForAI
+        ? `${textToReview}\n\nSearch findings (titles/snippets only, do NOT include raw URLs):\n${searchSummaryForAI}`
+        : textToReview;
+
+      const result = await generateWithGemini('review', reviewInput, selectedModel);
+
+      if (!result.ok) {
+        setAiError(result.error);
+        setAiLoading(false);
+        return;
+      }
+
+      skeleton = parseSkeletonNotes(result.text);
+      aiResponseText = result.text.replace(/\[SEARCH_\w+:\s*.+?\]/g, '').trim();
+
+      // Normalize skeleton blocks: ensure AI information section is a single paragraph.
+      if (skeleton && Array.isArray(skeleton.blocks)) {
+        const normalizedBlocks: typeof skeleton.blocks = [];
+        for (const b of skeleton.blocks) {
+          if (b.kind === 'ai') {
+            // Collapse whitespace/newlines into single spaces to avoid multi-paragraph AI blocks.
+            const cleanText = (b.text || '').replace(/\s+/g, ' ').trim();
+            const last = normalizedBlocks[normalizedBlocks.length - 1];
+            if (last && last.kind === 'ai') {
+              // Merge into previous ai block (separate sentences with a space).
+              last.text = `${last.text.replace(/\s+/g, ' ').trim()} ${cleanText}`.trim();
+            } else {
+              normalizedBlocks.push({ kind: 'ai', text: cleanText });
+            }
+          } else {
+            // input blocks: keep as-is but sanitize prompt whitespace
+            const prompt = (b.prompt || '').replace(/\s+/g, ' ').trim();
+            const linesRaw = (b.lines || 1);
+            normalizedBlocks.push({ kind: 'input', prompt, lines: Number.isFinite(linesRaw) ? Math.max(1, Math.min(6, Math.floor(linesRaw))) : 1 });
+          }
+        }
+
+        // Ensure we don't have more than one AI info block at the start.
+        // If there are multiple ai blocks, merge all consecutive leading ai blocks.
+        if (normalizedBlocks.length > 1) {
+          const firstAiIndex = normalizedBlocks.findIndex((x) => x.kind === 'ai');
+          if (firstAiIndex >= 0) {
+            // Merge any ai blocks that appear before the first input block.
+            let mergeText = '';
+            let i = firstAiIndex;
+            while (i < normalizedBlocks.length && normalizedBlocks[i].kind === 'ai') {
+              mergeText = `${mergeText} ${normalizedBlocks[i].text}`.trim();
+              i += 1;
+            }
+            // Replace the leading ai blocks with a single ai block
+            const rest = normalizedBlocks.slice(i);
+            const merged = [{ kind: 'ai', text: mergeText }, ...rest];
+            skeleton.blocks = merged;
+          } else {
+            skeleton.blocks = normalizedBlocks;
+          }
+        } else {
+          skeleton.blocks = normalizedBlocks;
+        }
+      }
+
+      // If the model suggested additional searches via tag, try to honor them (best-effort).
+      const extraSearchTagMatch = result.text.match(/\[SEARCH_(?:VIDEOS|ARTICLES|IMAGES|ALL):\s*(.+?)\]/);
+      if (extraSearchTagMatch && extraSearchTagMatch[1]) {
+        try {
+          const tagQuery = extraSearchTagMatch[1].trim();
+          const ensured = ensureCoverageQueries({ shouldSearch: true, queries: [] }, tagQuery);
+          const agentQueries: AgentSearchRequest[] = ensured.queries.map((q) => ({
+            type: q.type === 'web' ? 'article' : (q.type as AgentSearchResult['type']),
+            query: q.query,
+          }));
+          const agentResults = await searchWithAgent(agentQueries, selectedModel);
+          const items = orderedSearchResultsToItems(agentResults);
+          inlineItems = [...inlineItems, ...items];
+          const mediaFirstOrder: ResultItemType[] = ['image', 'video', 'article', 'snippet'];
+          inlineItems = inlineItems.sort(
+            (a, b) => mediaFirstOrder.indexOf(a.type) - mediaFirstOrder.indexOf(b.type)
+          );
+        } catch (e) {
+          // ignore extra search failures
+        }
       }
     } catch (searchError) {
       console.error('Auto-search failed:', searchError);

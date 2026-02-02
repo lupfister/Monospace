@@ -487,7 +487,8 @@ export function DocumentEditor() {
           const fallbackUrl = img.dataset.fallbackUrl || figure?.dataset.fallbackUrl || '';
           const fallback = document.createElement('div');
           if (fallbackUrl) {
-            fallback.appendChild(createLinkRow(fallbackUrl, 'Open link'));
+            const imgLabel = img.alt ? `Open image: ${img.alt}` : 'Open image';
+            fallback.appendChild(createLinkRow(fallbackUrl, imgLabel));
           } else {
             fallback.appendChild(createAiTextSpan('Image unavailable'));
           }
@@ -521,7 +522,8 @@ export function DocumentEditor() {
           container.appendChild(img);
         }
         if (item.url) {
-          container.appendChild(createLinkRow(item.url, 'Open link'));
+          const imgLabel = item.title ? `Open image: ${item.title}` : 'Open image';
+          container.appendChild(createLinkRow(item.url, imgLabel));
         }
         return container;
       }
@@ -529,7 +531,8 @@ export function DocumentEditor() {
       if (item.type === 'article') {
         container.appendChild(createAiTextBlock(item.snippet || item.title));
         if (item.url) {
-          container.appendChild(createLinkRow(item.url, 'Open article'));
+          const articleLabel = item.title ? `Open article: ${item.title}` : 'Open article';
+          container.appendChild(createLinkRow(item.url, articleLabel));
         }
       }
 
@@ -539,7 +542,7 @@ export function DocumentEditor() {
   );
 
   const buildSearchResultsBlock = useCallback(
-    (items: ResultItem[]): HTMLElement => {
+    async (items: ResultItem[]): Promise<HTMLElement> => {
       const resultsContainer = document.createElement('div');
       resultsContainer.className = resultCardClasses.block;
       resultsContainer.dataset.embed = 'search-results';
@@ -549,34 +552,107 @@ export function DocumentEditor() {
       const mediaItems = searchableItems.filter((item) => item.type === 'image' || item.type === 'video');
       const infoItems = searchableItems.filter((item) => item.type === 'article');
 
-      const limitedMedia = mediaItems.slice(0, 2);
-      const limitedInfo = infoItems.slice(0, 4);
+      const limitedMedia = mediaItems.slice(0, 1); // keep visuals minimal
+      const limitedInfo = infoItems.slice(0, 6); // we'll summarize these
 
       if (limitedMedia.length === 0 && limitedInfo.length === 0) {
         resultsContainer.appendChild(createAiTextBlock('No results found. Try a different search query.'));
         return resultsContainer;
       }
 
+      // Show a single representative media item (if any)
       if (limitedMedia.length > 0) {
         limitedMedia.forEach((item) => {
           resultsContainer.appendChild(createInlineResultCard(item));
         });
       }
 
-      if (limitedInfo.length > 0) {
-        if (limitedMedia.length > 0) {
-          const spacer = document.createElement('div');
-          spacer.className = 'h-1';
-          resultsContainer.appendChild(spacer);
+      // Build a concise combined summary from article snippets/titles
+      const textForSummary = limitedInfo
+        .map((it) => (it.snippet ? `${it.title}: ${it.snippet}` : it.title))
+        .join('\n\n');
+
+      let summaryText = '';
+      try {
+        if (textForSummary.trim()) {
+          const gen = await generateWithGemini('summarize', textForSummary, selectedModel);
+          if (gen.ok && gen.text) {
+            summaryText = gen.text.replace(/\s+/g, ' ').trim();
+          }
         }
-        limitedInfo.forEach((item) => {
-          resultsContainer.appendChild(createInlineResultCard(item));
+      } catch (e) {
+        // fall back to a simple handcrafted summary
+        summaryText = limitedInfo.length
+          ? limitedInfo.map((i) => i.title).slice(0, 3).join('; ')
+          : '';
+      }
+
+      if (!summaryText && limitedInfo.length > 0) {
+        // fallback short human-readable summary
+        summaryText = limitedInfo
+          .map((it) => it.title)
+          .slice(0, 3)
+          .join('; ');
+      }
+
+      if (summaryText) {
+        const p = document.createElement('div');
+        p.appendChild(createAiTextSpan(summaryText));
+        resultsContainer.appendChild(p);
+      }
+
+      // Add at most one short quoted excerpt (conservative)
+      const excerptItem = limitedInfo.find((i) => {
+        if (!i.snippet || !i.snippet.trim()) return false;
+        const len = i.snippet.trim().length;
+        return len >= 20 && len <= 400;
+      });
+
+      if (excerptItem) {
+        const block = document.createElement('blockquote');
+        block.className = resultCardClasses.quote;
+        block.appendChild(document.createTextNode(excerptItem.snippet || ''));
+        resultsContainer.appendChild(block);
+
+        if (excerptItem.url) {
+          const excerptLink = createLinkRow(
+            excerptItem.url,
+            excerptItem.title ? `Open article: ${excerptItem.title}` : 'Open source'
+          );
+          resultsContainer.appendChild(excerptLink);
+        }
+      }
+
+      // Sources list (compact) — use the same "Open ..." style as other links
+      if (limitedInfo.length > 0) {
+        const sourcesWrapper = document.createElement('div');
+        sourcesWrapper.className = 'mt-2 text-xs text-gray-600';
+        const label = document.createElement('div');
+        label.className = 'text-[11px] text-gray-500 mb-1';
+        label.textContent = 'Sources';
+        sourcesWrapper.appendChild(label);
+
+        const listDiv = document.createElement('div');
+        listDiv.style.display = 'flex';
+        listDiv.style.flexDirection = 'column';
+        listDiv.style.gap = '4px';
+
+        limitedInfo.forEach((it) => {
+          if (!it.url) return;
+          const linkRow = createLinkRow(
+            it.url,
+            it.title ? `Open article: ${it.title}` : it.url
+          );
+          listDiv.appendChild(linkRow);
         });
+
+        sourcesWrapper.appendChild(listDiv);
+        resultsContainer.appendChild(sourcesWrapper);
       }
 
       return resultsContainer;
     },
-    [createAiTextBlock, createInlineResultCard]
+    [createAiTextBlock, createInlineResultCard, createLinkRow, selectedModel]
   );
 
   const insertSearchResultsInline = useCallback(
@@ -633,7 +709,7 @@ export function DocumentEditor() {
           insertRange.collapse(false);
         }
 
-        const resultsContainer = buildSearchResultsBlock(items);
+        const resultsContainer = await buildSearchResultsBlock(items);
         insertRange.insertNode(resultsContainer);
 
         const br = document.createElement('br');

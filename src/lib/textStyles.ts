@@ -37,6 +37,50 @@ export const createAiTextSpan = (text: string, lineHeight?: string): HTMLSpanEle
   return span;
 };
 
+/** Match markdown-style links [label](url). URL is non-greedy up to closing ). */
+const MARKDOWN_LINK = /\[([^\]]*)\]\(([^)]+)\)/g;
+
+/**
+ * Creates a DocumentFragment with AI-styled text and clickable links for [label](url) patterns.
+ */
+export const createAiTextWithLinksFragment = (text: string, lineHeight?: string): DocumentFragment => {
+  const fragment = document.createDocumentFragment();
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  MARKDOWN_LINK.lastIndex = 0;
+  while ((match = MARKDOWN_LINK.exec(text)) !== null) {
+    const before = text.slice(lastIndex, match.index);
+    if (before) {
+      const span = createAiTextSpan(before, lineHeight);
+      fragment.appendChild(span);
+    }
+    const label = match[1] || match[2];
+    const url = match[2].trim();
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = label;
+    a.style.color = AI_TEXT_STYLE.color;
+    a.style.fontFamily = AI_TEXT_STYLE.fontFamily;
+    a.style.fontSize = AI_TEXT_STYLE.fontSize;
+    a.style.fontWeight = String(AI_TEXT_STYLE.fontWeight);
+    a.style.textDecoration = 'underline';
+    a.style.cursor = 'pointer';
+    fragment.appendChild(a);
+    lastIndex = MARKDOWN_LINK.lastIndex;
+  }
+  if (lastIndex === 0) {
+    fragment.appendChild(createAiTextSpan(text, lineHeight));
+  } else {
+    const after = text.slice(lastIndex);
+    if (after) {
+      fragment.appendChild(createAiTextSpan(after, lineHeight));
+    }
+  }
+  return fragment;
+};
+
 /**
  * Creates a span element with human/user text styling
  */

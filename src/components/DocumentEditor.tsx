@@ -12,11 +12,34 @@ import {
 import { MarginText } from './MarginText';
 import Vector59 from '../imports/Vector59';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
-import { generateWithGemini, type GeminiAction, planSearchWithGemini } from '../lib/openaiAgentApi';
-import { createHumanTextSpan, createAiTextSpan, isHumanTextSpan } from '../lib/textStyles';
-import { type WebSearchResults, parseSearchResults } from '../lib/webSearch';
-import { getSearchCapabilities, performWebSearch } from '../lib/searchAPI';
+import {
+  AgentSearchRequest,
+  AgentSearchResult,
+  generateWithGemini,
+  searchWithAgent,
+  type GeminiAction,
+  type GeminiSearchType,
+  planSearchWithGemini,
+} from '../lib/openaiAgentApi';
+import { createHumanTextSpan, createAiTextSpan, createAiTextWithLinksFragment, isHumanTextSpan } from '../lib/textStyles';
 import { getLinkPreview, isProbablyUrl, type LinkPreviewData } from '../lib/linkPreviews';
+import {
+  orderedSearchResultsToItems,
+  resultCardClasses,
+  type ResultItem,
+  type ResultItemType,
+} from '../lib/searchResultItems';
+
+/**
+ * OpenAI model IDs that support the Agents API and hosted web search
+ * (GPT-4o and GPT-4.1 series). Ordered by price ascending (cheapest first).
+ * Rough per-1M tokens: 4o-mini $0.15/$0.60, 4.1-mini $0.80/$3.20, 4.1 $2/$8.
+ */
+const OPENAI_MODEL_OPTIONS: readonly string[] = [
+  'gpt-4o-mini',
+  'gpt-4.1-mini',
+  'gpt-4.1',
+];
 
 export function DocumentEditor() {
   const editorRef = useRef<HTMLDivElement>(null);
@@ -49,6 +72,8 @@ export function DocumentEditor() {
   const [aiError, setAiError] = useState<string | null>(null);
   const savedSelection = useRef<Range | null>(null);
   const [isSearching, setIsSearching] = useState(false);
+  const [selectedModel, setSelectedModel] = useState('gpt-4o-mini');
+  const isBusy = aiLoading || isSearching;
 
   // Auto-set margin side when there are texts
   useEffect(() => {
@@ -398,264 +423,239 @@ export function DocumentEditor() {
   }, [processLinksAndEmbeds]);
 
 
-  const insertSearchResultsInline = useCallback(async (
-    results: WebSearchResults,
-    selection: Selection
-  ) => {
-    if (!editorRef.current || !selection) {
-      console.error('Cannot insert: editorRef or selection is null');
-      return;
-    }
-    
-    console.log('insertSearchResultsInline called with:', results);
+  const createLinkRow = useCallback((url: string, label: string) => {
+    const row = document.createElement('div');
+    row.className = 'mt-2 flex items-center gap-2';
 
-    // Get insertion point (similar to AI review)
-    const range = selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
-    if (!range) return;
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.setAttribute('aria-label', label);
+    link.tabIndex = 0;
+    link.addEventListener('keydown', (event) => {
+      if (event.key !== ' ') return;
+      event.preventDefault();
+      window.open(url, '_blank', 'noopener,noreferrer');
+    });
 
-    let insertAfterElement: Node | null = null;
-    let container: Node = range.startContainer;
-    if (container.nodeType === Node.TEXT_NODE) {
-      container = container.parentElement || container;
-    }
+    const iconSpan = document.createElement('span');
+    iconSpan.setAttribute('aria-hidden', 'true');
+    iconSpan.style.color = '#6e6e6e';
+    iconSpan.style.flexShrink = '0';
+    iconSpan.style.fontSize = '14px';
+    iconSpan.style.lineHeight = '1';
+    iconSpan.textContent = '\u2197';
 
-    // Find block element to insert after
-    let blockElement: HTMLElement | null = null;
-    let current: Node | null = container as Node;
-    
-    while (current && current !== editorRef.current) {
-      if (current.nodeType === Node.ELEMENT_NODE) {
-        const el = current as HTMLElement;
-        if (el.tagName === 'P' || el.tagName === 'DIV' || 
-            el.tagName.match(/^H[1-6]$/) || el.tagName === 'LI') {
-          blockElement = el;
-          break;
+    link.appendChild(iconSpan);
+    link.appendChild(createAiTextSpan(label));
+    link.className = 'inline-flex items-center gap-2';
+    row.appendChild(link);
+    return row;
+  }, []);
+
+  const createAiTextBlock = useCallback(
+    (text: string, className?: string) => {
+      const el = document.createElement('div');
+      if (className) el.className = className;
+      el.appendChild(createAiTextSpan(text));
+      return el;
+    },
+    []
+  );
+
+  const hydrateSearchResultImages = useCallback((root: HTMLElement | null) => {
+    if (!root) return;
+    const imgs = root.querySelectorAll<HTMLImageElement>('img[data-proxy-url]');
+    imgs.forEach((img) => {
+      const proxyUrl = img.dataset.proxyUrl;
+      if (!proxyUrl) return;
+      fetch(proxyUrl)
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const ct = (res.headers.get('content-type') || '').toLowerCase();
+          if (!ct.startsWith('image/')) throw new Error('Not an image');
+          return res.blob();
+        })
+        .then((blob) => {
+          const url = URL.createObjectURL(blob);
+          img.src = url;
+          img.onload = () => URL.revokeObjectURL(url);
+        })
+        .catch(() => {
+          const figure = img.closest('figure');
+          const fallbackUrl = img.dataset.fallbackUrl || figure?.dataset.fallbackUrl || '';
+          const fallback = document.createElement('div');
+          if (fallbackUrl) {
+            fallback.appendChild(createLinkRow(fallbackUrl, 'Open link'));
+          } else {
+            fallback.appendChild(createAiTextSpan('Image unavailable'));
+          }
+          img.parentNode?.insertBefore(fallback, img);
+          img.remove();
+        });
+    });
+  }, []);
+
+  const createInlineResultCard = useCallback(
+    (item: ResultItem) => {
+      const isMedia = item.type === 'video' || item.type === 'image';
+      const container = document.createElement('div');
+
+      container.className = resultCardClasses.item;
+      container.dataset.resultType = item.type;
+      if (item.url) container.dataset.url = item.url;
+      if (isMedia) container.contentEditable = 'false';
+
+      if (item.type === 'image' || item.type === 'video') {
+        const imageUrl = item.thumbnail || item.url || '';
+        if (imageUrl) {
+          const img = document.createElement('img');
+          const proxyUrl = `/api/ai/image?url=${encodeURIComponent(imageUrl)}`;
+          img.dataset.proxyUrl = proxyUrl;
+          if (item.url) img.dataset.fallbackUrl = item.url;
+          img.alt = item.title || (item.type === 'video' ? 'Video thumbnail' : 'Image');
+          img.className = resultCardClasses.image;
+          img.style.minHeight = '120px';
+          img.style.backgroundColor = 'var(--color-gray-100, #f3f4f6)';
+          container.appendChild(img);
+        }
+        if (item.url) {
+          container.appendChild(createLinkRow(item.url, 'Open link'));
+        }
+        return container;
+      }
+
+      if (item.type === 'article') {
+        container.appendChild(createAiTextBlock(item.snippet || item.title));
+        if (item.url) {
+          container.appendChild(createLinkRow(item.url, 'Open article'));
         }
       }
-      current = current.parentNode;
-    }
 
-    insertAfterElement = blockElement || container;
+      return container;
+    },
+    [createAiTextBlock, createLinkRow]
+  );
 
-    try {
-      const sel = window.getSelection();
-      if (!sel || !editorRef.current || !insertAfterElement) return;
-
-      const insertRange = document.createRange();
-      
-      if (insertAfterElement.parentNode) {
-        insertRange.setStartAfter(insertAfterElement);
-        insertRange.collapse(true);
-      } else {
-        insertRange.selectNodeContents(editorRef.current);
-        insertRange.collapse(false);
-      }
-
-      // Create container for search results
+  const buildSearchResultsBlock = useCallback(
+    (items: ResultItem[]): HTMLElement => {
       const resultsContainer = document.createElement('div');
-      resultsContainer.style.marginTop = '16px';
-      resultsContainer.style.marginBottom = '16px';
-      resultsContainer.style.padding = '16px';
-      resultsContainer.style.borderLeft = '3px solid #3b82f6';
-      resultsContainer.style.backgroundColor = '#f8fafc';
-      resultsContainer.style.borderRadius = '4px';
+      resultsContainer.className = resultCardClasses.block;
+      resultsContainer.dataset.embed = 'search-results';
+      resultsContainer.contentEditable = 'false';
 
-      // Add header
-      const header = document.createElement('div');
-      header.style.marginBottom = '12px';
-      header.style.fontSize = '14px';
-      header.style.fontWeight = '600';
-      header.style.color = '#1e293b';
-      header.textContent = '?? Search Results';
-      resultsContainer.appendChild(header);
+      const searchableItems = items.filter((item) => item.type !== 'snippet');
+      const mediaItems = searchableItems.filter((item) => item.type === 'image' || item.type === 'video');
+      const infoItems = searchableItems.filter((item) => item.type === 'article');
 
-      // Add YouTube videos
-      if (results.videos.length > 0) {
-        const videosSection = document.createElement('div');
-        videosSection.style.marginBottom = '16px';
-        
-        const videosTitle = document.createElement('div');
-        videosTitle.style.fontSize = '13px';
-        videosTitle.style.fontWeight = '600';
-        videosTitle.style.color = '#dc2626';
-        videosTitle.style.marginBottom = '8px';
-        videosTitle.textContent = '?? YouTube Videos';
-        videosSection.appendChild(videosTitle);
+      const limitedMedia = mediaItems.slice(0, 2);
+      const limitedInfo = infoItems.slice(0, 4);
 
-        results.videos.slice(0, 3).forEach((video) => {
-          const videoItem = document.createElement('div');
-          videoItem.style.marginBottom = '12px';
-          videoItem.style.padding = '8px';
-          videoItem.style.backgroundColor = 'white';
-          videoItem.style.borderRadius = '4px';
-          videoItem.style.border = '1px solid #e2e8f0';
+      if (limitedMedia.length === 0 && limitedInfo.length === 0) {
+        resultsContainer.appendChild(createAiTextBlock('No results found. Try a different search query.'));
+        return resultsContainer;
+      }
 
-          const videoLink = document.createElement('a');
-          videoLink.href = video.url;
-          videoLink.target = '_blank';
-          videoLink.rel = 'noopener noreferrer';
-          videoLink.style.textDecoration = 'none';
-          videoLink.style.color = '#2563eb';
-          videoLink.style.fontSize = '13px';
-          videoLink.style.fontWeight = '500';
-          videoLink.textContent = video.title;
-          videoItem.appendChild(videoLink);
+      if (limitedMedia.length > 0) {
+        limitedMedia.forEach((item) => {
+          resultsContainer.appendChild(createInlineResultCard(item));
+        });
+      }
 
-          if (video.snippet) {
-            const snippet = document.createElement('div');
-            snippet.style.fontSize = '12px';
-            snippet.style.color = '#64748b';
-            snippet.style.marginTop = '4px';
-            snippet.textContent = video.snippet.substring(0, 150) + (video.snippet.length > 150 ? '...' : '');
-            videoItem.appendChild(snippet);
+      if (limitedInfo.length > 0) {
+        if (limitedMedia.length > 0) {
+          const spacer = document.createElement('div');
+          spacer.className = 'h-1';
+          resultsContainer.appendChild(spacer);
+        }
+        limitedInfo.forEach((item) => {
+          resultsContainer.appendChild(createInlineResultCard(item));
+        });
+      }
+
+      return resultsContainer;
+    },
+    [createAiTextBlock, createInlineResultCard]
+  );
+
+  const insertSearchResultsInline = useCallback(
+    async ({
+      items,
+      selection,
+      insertAfterNode,
+    }: {
+      items: ResultItem[];
+      selection: Selection | null;
+      insertAfterNode?: Node | null;
+    }) => {
+      if (!editorRef.current) {
+        console.error('Cannot insert: editorRef is null');
+        return null;
+      }
+
+      if (items.length === 0) return null;
+
+      let insertAfterElement: Node | null = insertAfterNode ?? null;
+
+      if (!insertAfterElement && selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0).cloneRange();
+        let container: Node = range.startContainer;
+        if (container.nodeType === Node.TEXT_NODE) {
+          container = container.parentElement || container;
+        }
+        let current: Node | null = container as Node;
+        while (current && current !== editorRef.current) {
+          if (current.nodeType === Node.ELEMENT_NODE) {
+            const el = current as HTMLElement;
+            if (el.tagName === 'P' || el.tagName === 'DIV' || el.tagName.match(/^H[1-6]$/) || el.tagName === 'LI') {
+              insertAfterElement = el;
+              break;
+            }
           }
-
-          const urlText = document.createElement('div');
-          urlText.style.fontSize = '11px';
-          urlText.style.color = '#94a3b8';
-          urlText.style.marginTop = '4px';
-          urlText.textContent = video.url;
-          videoItem.appendChild(urlText);
-
-          videosSection.appendChild(videoItem);
-        });
-
-        resultsContainer.appendChild(videosSection);
+          current = current.parentNode;
+        }
+        if (!insertAfterElement) insertAfterElement = container;
       }
 
-      // Add Articles
-      if (results.articles.length > 0) {
-        const articlesSection = document.createElement('div');
-        articlesSection.style.marginBottom = '16px';
-        
-        const articlesTitle = document.createElement('div');
-        articlesTitle.style.fontSize = '13px';
-        articlesTitle.style.fontWeight = '600';
-        articlesTitle.style.color = '#2563eb';
-        articlesTitle.style.marginBottom = '8px';
-        articlesTitle.textContent = '?? Articles';
-        articlesSection.appendChild(articlesTitle);
+      if (!insertAfterElement) return null;
 
-        results.articles.slice(0, 3).forEach((article) => {
-          const articleItem = document.createElement('div');
-          articleItem.style.marginBottom = '12px';
-          articleItem.style.padding = '8px';
-          articleItem.style.backgroundColor = 'white';
-          articleItem.style.borderRadius = '4px';
-          articleItem.style.border = '1px solid #e2e8f0';
+      try {
+        const sel = window.getSelection();
+        if (!sel || !editorRef.current) return null;
 
-          const articleLink = document.createElement('a');
-          articleLink.href = article.url;
-          articleLink.target = '_blank';
-          articleLink.rel = 'noopener noreferrer';
-          articleLink.style.textDecoration = 'none';
-          articleLink.style.color = '#2563eb';
-          articleLink.style.fontSize = '13px';
-          articleLink.style.fontWeight = '500';
-          articleLink.textContent = article.title;
-          articleItem.appendChild(articleLink);
+        const insertRange = document.createRange();
+        if (insertAfterElement.parentNode) {
+          insertRange.setStartAfter(insertAfterElement);
+          insertRange.collapse(true);
+        } else {
+          insertRange.selectNodeContents(editorRef.current);
+          insertRange.collapse(false);
+        }
 
-          if (article.snippet) {
-            const snippet = document.createElement('div');
-            snippet.style.fontSize = '12px';
-            snippet.style.color = '#64748b';
-            snippet.style.marginTop = '4px';
-            snippet.textContent = article.snippet.substring(0, 150) + (article.snippet.length > 150 ? '...' : '');
-            articleItem.appendChild(snippet);
-          }
+        const resultsContainer = buildSearchResultsBlock(items);
+        insertRange.insertNode(resultsContainer);
 
-          const urlText = document.createElement('div');
-          urlText.style.fontSize = '11px';
-          urlText.style.color = '#94a3b8';
-          urlText.style.marginTop = '4px';
-          urlText.textContent = article.url;
-          articleItem.appendChild(urlText);
+        const br = document.createElement('br');
+        insertRange.setStartAfter(resultsContainer);
+        insertRange.collapse(true);
+        insertRange.insertNode(br);
 
-          articlesSection.appendChild(articleItem);
-        });
+        insertRange.setStartAfter(br);
+        insertRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(insertRange);
 
-        resultsContainer.appendChild(articlesSection);
+        editorRef.current?.focus();
+        return resultsContainer;
+      } catch (error) {
+        console.error('Error inserting results:', error);
+        setAiError('Could not insert search results. ' + (error instanceof Error ? error.message : String(error)));
+        return null;
       }
-
-      // Add Images
-      if (results.images.length > 0) {
-        const imagesSection = document.createElement('div');
-        imagesSection.style.marginBottom = '16px';
-        
-        const imagesTitle = document.createElement('div');
-        imagesTitle.style.fontSize = '13px';
-        imagesTitle.style.fontWeight = '600';
-        imagesTitle.style.color = '#16a34a';
-        imagesTitle.style.marginBottom = '8px';
-        imagesTitle.textContent = '??? Images';
-        imagesSection.appendChild(imagesTitle);
-
-        const imagesGrid = document.createElement('div');
-        imagesGrid.style.display = 'grid';
-        imagesGrid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(120px, 1fr))';
-        imagesGrid.style.gap = '8px';
-
-        results.images.slice(0, 6).forEach((image) => {
-          const imageItem = document.createElement('a');
-          imageItem.href = image.url;
-          imageItem.target = '_blank';
-          imageItem.rel = 'noopener noreferrer';
-          imageItem.style.display = 'block';
-          imageItem.style.textDecoration = 'none';
-
-          const img = document.createElement('img');
-          img.src = image.thumbnail || image.url;
-          img.alt = image.title || 'Image';
-          img.style.width = '100%';
-          img.style.height = '120px';
-          img.style.objectFit = 'cover';
-          img.style.borderRadius = '4px';
-          img.style.border = '1px solid #e2e8f0';
-          img.onerror = () => {
-            img.style.display = 'none';
-          };
-
-          imageItem.appendChild(img);
-          imagesGrid.appendChild(imageItem);
-        });
-
-        imagesSection.appendChild(imagesGrid);
-        resultsContainer.appendChild(imagesSection);
-      }
-
-      // If no results, show message
-      if (results.videos.length === 0 && results.articles.length === 0 && results.images.length === 0) {
-        const noResults = document.createElement('div');
-        noResults.style.fontSize = '13px';
-        noResults.style.color = '#64748b';
-        noResults.style.fontStyle = 'italic';
-        noResults.textContent = 'No results found. Try a different search query.';
-        resultsContainer.appendChild(noResults);
-      }
-
-      // Insert the results container
-      console.log('Inserting results container with', results.videos.length, 'videos,', results.articles.length, 'articles,', results.images.length, 'images');
-      insertRange.insertNode(resultsContainer);
-
-      // Add spacing after
-      const br = document.createElement('br');
-      insertRange.setStartAfter(resultsContainer);
-      insertRange.collapse(true);
-      insertRange.insertNode(br);
-
-      // Move cursor after the inserted content
-      insertRange.setStartAfter(br);
-      insertRange.collapse(true);
-      sel.removeAllRanges();
-      sel.addRange(insertRange);
-
-      editorRef.current?.focus();
-      console.log('Results inserted successfully!');
-    } catch (error) {
-      console.error('Error inserting results:', error);
-      setAiError('Could not insert search results. ' + (error instanceof Error ? error.message : String(error)));
-    }
-  }, [setAiError]);
+    },
+    [buildSearchResultsBlock, setAiError]
+  );
 
   type SkeletonNotesBlock =
     | { kind: 'ai'; text: string }
@@ -725,7 +725,7 @@ export function DocumentEditor() {
 
         if (block.kind === 'ai') {
           const p = document.createElement('p');
-          p.appendChild(createAiTextSpan(block.text));
+          p.appendChild(createAiTextWithLinksFragment(block.text));
           fragment.appendChild(p);
           lastNode = p;
 
@@ -928,36 +928,123 @@ export function DocumentEditor() {
     setAiError(null);
     setAiLoading(true);
 
-    const result = await generateWithGemini('review', textToReview);
-    setAiLoading(false);
+    const result = await generateWithGemini('review', textToReview, selectedModel);
 
     if (!result.ok) {
       setAiError(result.error);
+      setAiLoading(false);
       return;
     }
 
     const skeleton = parseSkeletonNotes(result.text);
 
-    // Keep the user-facing response clean; search is planned separately (agentic flow).
     const aiResponseText = result.text.replace(/\[SEARCH_\w+:\s*.+?\]/g, '').trim();
 
-    // Insert the AI review response below the reviewed text
+    // Run search first so we can place results right after the user's paragraph (within document flow).
+    let inlineItems: ResultItem[] = [];
+    const ensureCoverageQueries = (
+      plan: GeminiSearchPlan,
+      baseQuery: string,
+    ): GeminiSearchPlan => {
+      const trimmed = baseQuery.trim();
+      const safeQuery = trimmed.length > 140 ? trimmed.slice(0, 140) : trimmed;
+
+      const findQueryByType = (type: GeminiSearchType) =>
+        plan.queries.find((q) => q.type === type);
+
+      const imageQuery = findQueryByType('image') ?? {
+        type: 'image' as const,
+        query: `${safeQuery} high quality photo`,
+        reason: 'Provide a concrete visual reference.',
+      };
+      const videoQuery = findQueryByType('video') ?? {
+        type: 'video' as const,
+        query: `${safeQuery} explainer video`,
+        reason: 'Provide a visual walkthrough.',
+      };
+      const webQuery = findQueryByType('web') ?? {
+        type: 'web' as const,
+        query: `${safeQuery} longform article analysis`,
+        reason: 'Provide a deeper, text-based source.',
+      };
+
+      // Order: images and videos first (media), then web/articles (information).
+      return { shouldSearch: true, queries: [imageQuery, videoQuery, webQuery].slice(0, 3) };
+    };
+
+    setIsSearching(true);
+    try {
+      let plan = await planSearchWithGemini(`${textToReview}\n\nAssistant response:\n${aiResponseText}`, selectedModel);
+
+      const lower = textToReview.toLowerCase();
+      const wantsImages =
+        lower.includes('image') ||
+        lower.includes('images') ||
+        lower.includes('picture') ||
+        lower.includes('pictures') ||
+        lower.includes('photo') ||
+        lower.includes('photos');
+      const wantsVideos =
+        lower.includes('video') ||
+        lower.includes('videos') ||
+        lower.includes('youtube');
+
+      if (!plan.shouldSearch || plan.queries.length === 0) {
+        plan = ensureCoverageQueries({ shouldSearch: true, queries: [] }, textToReview);
+      } else {
+        plan = ensureCoverageQueries(plan, textToReview);
+      }
+
+      if (plan.shouldSearch && plan.queries.length > 0) {
+        const agentQueries: AgentSearchRequest[] = plan.queries.map((q) => ({
+          type: q.type === 'web' ? 'article' : (q.type as AgentSearchResult['type']),
+          query: q.query,
+        }));
+        const agentResults = await searchWithAgent(agentQueries, selectedModel);
+        const items = orderedSearchResultsToItems(agentResults);
+        // Order: images and video embeds first, then articles (information with links).
+        const mediaFirstOrder: ResultItemType[] = ['image', 'video', 'article', 'snippet'];
+        inlineItems = [...items].sort(
+          (a, b) => mediaFirstOrder.indexOf(a.type) - mediaFirstOrder.indexOf(b.type)
+        );
+      }
+    } catch (searchError) {
+      console.error('Auto-search failed:', searchError);
+      setAiError(
+        'Search request failed. ' + (searchError instanceof Error ? searchError.message : String(searchError))
+      );
+    } finally {
+      setIsSearching(false);
+    }
+
+    // Insert: [user paragraph] → [search results if any] → [gap] → [AI review]
     try {
       const sel = window.getSelection();
       if (!sel || !editorRef.current || !insertAfterElement) return;
 
+      let insertPoint: Node = insertAfterElement;
+
+      if (inlineItems.length > 0) {
+        const resultsBlock = await insertSearchResultsInline({
+          items: inlineItems,
+          selection: null,
+          insertAfterNode: insertAfterElement,
+        });
+        if (resultsBlock) {
+          insertPoint = resultsBlock;
+          hydrateSearchResultImages(resultsBlock);
+        }
+      }
+
       const insertRange = document.createRange();
-      
-      if (insertAfterElement.parentNode) {
-        insertRange.setStartAfter(insertAfterElement);
+      if (insertPoint.parentNode) {
+        insertRange.setStartAfter(insertPoint);
         insertRange.collapse(true);
       } else {
         insertRange.selectNodeContents(editorRef.current);
         insertRange.collapse(false);
       }
 
-      // Always insert a single gap line **below the user's input**
-      // before any AI-generated content.
       const preGap = document.createElement('p');
       const preGapSpan = createHumanTextSpan('\u00A0');
       preGap.appendChild(preGapSpan);
@@ -966,117 +1053,35 @@ export function DocumentEditor() {
       insertRange.collapse(true);
 
       let lastInsertedNode: Node | null = null;
-
       if (skeleton) {
         lastInsertedNode = insertSkeletonNotesInline(insertRange, skeleton.blocks);
       } else {
-        // Fallback: treat the whole response as a single AI block
-        const syntheticBlocks: SkeletonNotesBlock[] = [
-          { kind: 'ai', text: aiResponseText },
-        ];
+        const syntheticBlocks: SkeletonNotesBlock[] = [{ kind: 'ai', text: aiResponseText }];
         lastInsertedNode = insertSkeletonNotesInline(insertRange, syntheticBlocks);
       }
 
-      // Move cursor after the last inserted node
       if (lastInsertedNode) {
         insertRange.setStartAfter(lastInsertedNode);
         insertRange.collapse(true);
         sel.removeAllRanges();
         sel.addRange(insertRange);
       }
-
-      // Agentic retrieval: decide whether to search, then execute searches.
-      setIsSearching(true);
-      try {
-        const caps = getSearchCapabilities();
-        let plan = await planSearchWithGemini(`${textToReview}\n\nAssistant response:\n${aiResponseText}`);
-
-        // Heuristic fallback: if the user is clearly asking for external media but
-        // the model declined to search, force a simple search plan so it "just works".
-        const lower = textToReview.toLowerCase();
-        const wantsImages =
-          lower.includes('image') ||
-          lower.includes('images') ||
-          lower.includes('picture') ||
-          lower.includes('pictures') ||
-          lower.includes('photo') ||
-          lower.includes('photos');
-        const wantsVideos =
-          lower.includes('video') ||
-          lower.includes('videos') ||
-          lower.includes('youtube');
-
-        if ((!plan.shouldSearch || plan.queries.length === 0) && (wantsImages || wantsVideos)) {
-          plan = {
-            shouldSearch: true,
-            queries: [
-              {
-                type: wantsImages ? 'image' : 'video',
-                query: textToReview.trim(),
-                reason: 'User explicitly asked for visual content; perform a direct search.',
-              },
-            ],
-          };
-        }
-
-        if (!plan.shouldSearch || plan.queries.length === 0) return;
-
-        // If the model wants search but no providers are configured, surface a clear message.
-        if (!caps.hasGeminiKey && !caps.hasPexelsKey) {
-          setAiError(
-            'Search is not configured. Add `VITE_GEMINI_API_KEY` (web/videos via Google grounding) and/or `VITE_PEXELS_API_KEY` (images/videos) to your `.env`, then restart the dev server.'
-          );
-          return;
-        }
-
-        const combined: WebSearchResults = { videos: [], images: [], articles: [] };
-        for (const q of plan.queries) {
-          const raw = await performWebSearch(q.query, { type: q.type }).catch(() => []);
-          const parsed = parseSearchResults(q.query, raw);
-          combined.videos.push(...parsed.videos);
-          combined.images.push(...parsed.images);
-          combined.articles.push(...parsed.articles);
-        }
-
-        const hasAny =
-          combined.videos.length > 0 || combined.images.length > 0 || combined.articles.length > 0;
-        if (!hasAny) {
-          // If keys exist but we still got nothing, give a lightweight hint instead of silence.
-          if (!caps.hasGeminiKey && caps.hasPexelsKey) {
-            setAiError('No results returned. Pexels is configured; Gemini web search is not. Add `VITE_GEMINI_API_KEY` for web/article/YouTube results.');
-            return;
-          }
-          if (caps.hasGeminiKey && !caps.hasPexelsKey) {
-            setAiError('No image results returned. For image searches, add `VITE_PEXELS_API_KEY` to your `.env` file (free at https://www.pexels.com/api/). Gemini\'s grounded search returns web pages, not direct image URLs.');
-            return;
-          }
-          setAiError('No search results returned. Check your API keys and network access, then try again.');
-          return;
-        }
-
-        const freshSelection = window.getSelection();
-        if (!freshSelection) return;
-
-        if (!lastInsertedNode) return;
-        const resultsRange = document.createRange();
-        resultsRange.setStartAfter(lastInsertedNode);
-        resultsRange.collapse(true);
-        freshSelection.removeAllRanges();
-        freshSelection.addRange(resultsRange);
-
-        await insertSearchResultsInline(combined, freshSelection);
-      } catch (searchError) {
-        console.error('Auto-search failed:', searchError);
-        // Search is optional; keep UX silent.
-      } finally {
-        setIsSearching(false);
-      }
     } catch (error) {
       setAiError('Could not insert review. ' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setAiLoading(false);
     }
 
     editorRef.current?.focus();
-  }, [setAiError, setAiLoading]);
+  }, [
+    hydrateSearchResultImages,
+    insertSearchResultsInline,
+    insertSkeletonNotesInline,
+    parseSkeletonNotes,
+    selectedModel,
+    setAiError,
+    setAiLoading,
+  ]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1170,6 +1175,10 @@ export function DocumentEditor() {
     editorRef.current?.focus();
   };
 
+  const handleModelChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    setSelectedModel(event.target.value);
+  };
+
   const handleAiAction = async (action: GeminiAction) => {
     const selection = window.getSelection();
     if (!selection || !editorRef.current) return;
@@ -1186,7 +1195,7 @@ export function DocumentEditor() {
     setAiLoading(true);
     savedSelection.current = range;
 
-    const result = await generateWithGemini(action, selectedText);
+    const result = await generateWithGemini(action, selectedText, selectedModel);
     setAiLoading(false);
 
     if (!result.ok) {
@@ -1240,9 +1249,10 @@ export function DocumentEditor() {
     const savedContent = localStorage.getItem('documentContent');
     if (savedContent && editorRef.current) {
       editorRef.current.innerHTML = savedContent;
+      requestAnimationFrame(() => hydrateSearchResultImages(editorRef.current));
     }
     // If no saved content, the placeholder "Start writing..." is already in the JSX
-  }, []);
+  }, [hydrateSearchResultImages]);
 
   const isClickInSelection = (x: number, y: number): boolean => {
     const selection = window.getSelection();
@@ -2262,6 +2272,31 @@ export function DocumentEditor() {
             </PopoverContent>
           </Popover>
 
+          <div className="ml-2 flex items-center gap-2">
+            <label htmlFor="model-select" className="text-xs text-gray-500">
+              Model
+            </label>
+            <select
+              id="model-select"
+              value={OPENAI_MODEL_OPTIONS.includes(selectedModel) ? selectedModel : OPENAI_MODEL_OPTIONS[0]}
+              onChange={handleModelChange}
+              className="text-xs border border-gray-200 rounded px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+              aria-label="Select AI model"
+            >
+              {OPENAI_MODEL_OPTIONS.map((modelId) => (
+                <option key={modelId} value={modelId}>
+                  {modelId}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {isBusy && (
+            <div className="ml-2 flex items-center gap-1 text-xs text-gray-500">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
+              <span>{isSearching ? 'Searching...' : 'Thinking...'}</span>
+            </div>
+          )}
         </div>
       </div>
 

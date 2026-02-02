@@ -11,6 +11,21 @@ export type GeminiSearchPlan = {
   }>;
 };
 
+export type AgentSearchType = 'video' | 'article' | 'image';
+
+export interface AgentSearchResult {
+  type: AgentSearchType;
+  title: string;
+  url: string;
+  snippet?: string;
+  thumbnail?: string;
+}
+
+export interface AgentSearchRequest {
+  type: AgentSearchType;
+  query: string;
+}
+
 export interface GeminiGenerateResult {
   text: string;
   ok: true;
@@ -33,6 +48,7 @@ const mapGeminiActionToAiAction = (action: GeminiAction): AiAction => {
 const postAiAction = async <TResponse>(body: {
   action: AiAction;
   text: string;
+  model?: string | null;
 }): Promise<TResponse> => {
   try {
     const res = await fetch('/api/ai/action', {
@@ -59,6 +75,7 @@ const postAiAction = async <TResponse>(body: {
 export const generateWithGemini = async (
   action: GeminiAction,
   selectedText: string,
+  model?: string | null,
 ): Promise<GeminiResult> => {
   const trimmed = selectedText.trim();
   if (!trimmed) {
@@ -71,6 +88,7 @@ export const generateWithGemini = async (
     const data = await postAiAction<{ ok: boolean; text: string }>({
       action: aiAction,
       text: trimmed,
+      model: model ?? undefined,
     });
 
     if (!data.ok || !data.text) {
@@ -89,6 +107,7 @@ export const generateWithGemini = async (
 
 export const planSearchWithGemini = async (
   text: string,
+  model?: string | null,
 ): Promise<GeminiSearchPlan> => {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -102,6 +121,7 @@ export const planSearchWithGemini = async (
     }>({
       action: 'plan_search',
       text: trimmed,
+      model: model ?? undefined,
     });
 
     if (!data.ok || !data.plan) {
@@ -139,5 +159,35 @@ export const planSearchWithGemini = async (
   } catch {
     return { shouldSearch: false, queries: [] };
   }
+};
+
+export const searchWithAgent = async (
+  queries: AgentSearchRequest[],
+  model?: string | null,
+): Promise<AgentSearchResult[]> => {
+  const response = await fetch('/api/ai/search', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ queries, model: model ?? undefined }),
+  });
+
+  const data = (await response.json()) as {
+    ok?: boolean;
+    error?: string;
+    results?: AgentSearchResult[];
+  };
+
+  if (!response.ok || data.ok === false) {
+    const message = data.error || `Search request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+
+  if (!data.results) {
+    return [];
+  }
+
+  return data.results;
 };
 

@@ -804,7 +804,7 @@ export function DocumentEditor() {
   }, []);
 
   const insertSkeletonNotesInline = useCallback(
-    (insertRange: Range, blocks: SkeletonNotesBlock[]): Node | null => {
+    async (insertRange: Range, blocks: SkeletonNotesBlock[], inlineItems?: ResultItem[]): Promise<Node | null> => {
       const fragment = document.createDocumentFragment();
       let lastNode: Node | null = null;
 
@@ -870,11 +870,37 @@ export function DocumentEditor() {
           lastNode = extraGap;
         }
       }
+      // If inlineItems (search results) were provided, append a rich results block
+      // into the skeleton fragment so media (images/videos) render inline with AI notes.
+      let resultsContainer: HTMLElement | null = null;
+      try {
+        if (inlineItems && inlineItems.length > 0) {
+          // Build a compact results block (may include media thumbnails, links, excerpt)
+          resultsContainer = await buildSearchResultsBlock(inlineItems);
+          if (resultsContainer) {
+            fragment.appendChild(resultsContainer);
+            lastNode = resultsContainer;
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to build inline search results for skeleton:', err);
+      }
 
       insertRange.insertNode(fragment);
+
+      // If we added images that require hydration/proxy fetches, hydrate them now.
+      if (resultsContainer) {
+        // Results container is now in the DOM; hydrate images.
+        try {
+          hydrateSearchResultImages(resultsContainer);
+        } catch {
+          // ignore hydration failures
+        }
+      }
+
       return lastNode;
     },
-    []
+    [createAiTextWithLinksFragment, buildSearchResultsBlock, hydrateSearchResultImages]
   );
 
   const handleAiReview = useCallback(async () => {
@@ -1209,17 +1235,8 @@ export function DocumentEditor() {
 
       let insertPoint: Node = insertAfterElement;
 
-      if (inlineItems.length > 0) {
-        const resultsBlock = await insertSearchResultsInline({
-          items: inlineItems,
-          selection: null,
-          insertAfterNode: insertAfterElement,
-        });
-        if (resultsBlock) {
-          insertPoint = resultsBlock;
-          hydrateSearchResultImages(resultsBlock);
-        }
-      }
+      // inlineItems (rich search results) will be passed into the skeleton inserter
+      // so embeds (images/videos) render inline with AI notes. No separate results block.
 
       const insertRange = document.createRange();
       if (insertPoint.parentNode) {
@@ -1239,10 +1256,10 @@ export function DocumentEditor() {
 
       let lastInsertedNode: Node | null = null;
       if (skeleton) {
-        lastInsertedNode = insertSkeletonNotesInline(insertRange, skeleton.blocks);
+        lastInsertedNode = await insertSkeletonNotesInline(insertRange, skeleton.blocks, inlineItems);
       } else {
         const syntheticBlocks: SkeletonNotesBlock[] = [{ kind: 'ai', text: aiResponseText }];
-        lastInsertedNode = insertSkeletonNotesInline(insertRange, syntheticBlocks);
+        lastInsertedNode = await insertSkeletonNotesInline(insertRange, syntheticBlocks, inlineItems);
       }
 
       if (lastInsertedNode) {
@@ -1259,8 +1276,6 @@ export function DocumentEditor() {
 
     editorRef.current?.focus();
   }, [
-    hydrateSearchResultImages,
-    insertSearchResultsInline,
     insertSkeletonNotesInline,
     parseSkeletonNotes,
     selectedModel,

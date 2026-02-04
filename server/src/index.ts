@@ -28,6 +28,7 @@ interface AiRequestBody {
 
 app.post('/api/ai/action', async (req: any, res: any) => {
   const { action, text, model } = req.body || {};
+  console.log(`[API] /action request: ${action}, text len: ${text?.length}, model: ${model}`);
 
   if (!action || typeof action !== 'string') {
     return res.status(400).json({ ok: false, error: 'Missing or invalid "action" field.' });
@@ -122,18 +123,55 @@ const extractOgImageFromHtml = (html: string, baseUrl: string): string | null =>
 
 /** Extract direct image URLs from <img src="..."> in HTML. Prefer URLs that look like content images. */
 const extractImgSrcsFromHtml = (html: string, baseUrl: string): string[] => {
-  const urls: string[] = [];
+  const candidates: Array<{ url: string; score: number }> = [];
   const seen = new Set<string>();
-  const re = /<img[^>]+src=["']([^"']+)["']/gi;
+  const re = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
   let m: RegExpExecArray | null;
+
   while ((m = re.exec(html)) !== null) {
     const url = absolutize(m[1], baseUrl);
-    if (url && !seen.has(url)) {
-      seen.add(url);
-      urls.push(url);
-    }
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+
+    const imgTag = m[0];
+    let score = 0;
+
+    // Extract width/height if available
+    const widthMatch = imgTag.match(/width=["']?(\d+)/i);
+    const heightMatch = imgTag.match(/height=["']?(\d+)/i);
+    const width = widthMatch ? parseInt(widthMatch[1]) : 0;
+    const height = heightMatch ? parseInt(heightMatch[1]) : 0;
+
+    // Size scoring (larger images are usually content, not UI elements)
+    if (width >= 600 || height >= 400) score += 20;
+    else if (width >= 300 || height >= 200) score += 10;
+    else if (width > 0 && width < 100 && height > 0 && height < 100) score -= 15; // Likely icon/logo
+
+    // URL pattern scoring
+    const urlLower = url.toLowerCase();
+
+    // Positive signals
+    if (/upload|content|media|article|post|image|photo|picture/i.test(urlLower)) score += 15;
+    if (/\d{3,4}x\d{3,4}|large|full|original|hd/i.test(urlLower)) score += 12;
+    if (/wikimedia|wikipedia/i.test(urlLower)) score += 10;
+
+    // Negative signals (UI elements, not content)
+    if (/logo|icon|favicon|sprite|button|badge|avatar|thumbnail/i.test(urlLower)) score -= 25;
+    if (/ad|banner|promo|sponsor/i.test(urlLower)) score -= 20;
+    if (/\.svg/i.test(urlLower)) score -= 10; // SVGs often logos/icons
+    if (/pixel|tracking|analytics|1x1/i.test(urlLower)) score -= 30;
+
+    // Class/alt scoring from img tag
+    if (/class=["'][^"']*(?:hero|featured|main|article|content)[^"']*["']/i.test(imgTag)) score += 15;
+    if (/class=["'][^"']*(?:logo|icon|nav|header|footer)[^"']*["']/i.test(imgTag)) score -= 15;
+
+    candidates.push({ url, score });
   }
-  return urls;
+
+  // Sort by score (highest first) and return URLs
+  return candidates
+    .sort((a, b) => b.score - a.score)
+    .map(c => c.url);
 };
 
 /** Resolve to the first URL that returns an actual image (Content-Type image/*). */

@@ -9,7 +9,6 @@ import {
   Sparkles,
   Loader2
 } from 'lucide-react';
-import Vector59 from '../imports/Vector59';
 import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink } from '../lib/textStyles';
 import { isProbablyUrl } from '../lib/linkPreviews';
 
@@ -17,6 +16,8 @@ import { useLinkHydrator } from '../hooks/useLinkHydrator';
 import { useSearchAgent } from '../hooks/useSearchAgent';
 import { MarginTextContainer, MarginTextData } from './MarginTextContainer';
 import { OPENAI_MODEL_OPTIONS } from '../lib/openaiAgentApi';
+import { LineHeightHandle } from './LineHeightHandle';
+
 
 export function DocumentEditor() {
   const editorRef = useRef<HTMLDivElement>(null);
@@ -41,11 +42,34 @@ export function DocumentEditor() {
   const [additionalSelections, setAdditionalSelections] = useState<Range[]>([]);
   const [isShiftSelecting, setIsShiftSelecting] = useState(false);
   const shiftSelectStart = useRef<{ x: number; y: number } | null>(null);
+  const lastKnownRange = useRef<Range | null>(null);
+
+  // Line height handle state
+  const [lineHeightHandlePos, setLineHeightHandlePos] = useState<{ top: number; left: number; height: number } | null>(null);
+  const [isDraggingLineHeight, setIsDraggingLineHeight] = useState(false);
+  const [currentBlock, setCurrentBlock] = useState<HTMLElement | null>(null);
+  const lineHeightDragStart = useRef<{ y: number; initialHeight: number } | null>(null);
 
   const [selectedModel, setSelectedModel] = useState('gpt-4o-mini');
   const { handleAiReview, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(editorRef, selectedModel, hydrateSearchResultImages);
 
   const isBusy = aiLoading || isSearching;
+
+  // Track selection changes to support toolbar actions that steal focus (like Select)
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      const selection = window.getSelection();
+      if (selection && selection.rangeCount > 0 && editorRef.current) {
+        const range = selection.getRangeAt(0);
+        if (editorRef.current.contains(range.commonAncestorContainer)) {
+          lastKnownRange.current = range.cloneRange();
+        }
+      }
+    };
+
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => document.removeEventListener('selectionchange', handleSelectionChange);
+  }, []);
 
   // Auto-set margin side when there are texts
   useEffect(() => {
@@ -56,14 +80,84 @@ export function DocumentEditor() {
     }
   }, [marginTexts, marginSide]);
 
+  // Helper function to normalize content structure
+  const normalizeContent = useCallback(() => {
+    if (!editorRef.current) return;
+
+    const children = Array.from(editorRef.current.childNodes);
+    let needsNormalization = false;
+
+    // Check if there are any text nodes or inline elements at the root level
+    for (const child of children) {
+      if (child.nodeType === Node.TEXT_NODE && child.textContent?.trim()) {
+        needsNormalization = true;
+        break;
+      }
+      if (child.nodeType === Node.ELEMENT_NODE) {
+        const elem = child as Element;
+        if (!['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'UL', 'OL', 'BLOCKQUOTE'].includes(elem.tagName)) {
+          needsNormalization = true;
+          break;
+        }
+      }
+    }
+
+    if (needsNormalization || children.length === 0) {
+      const fragment = document.createDocumentFragment();
+      let currentP: HTMLParagraphElement | null = null;
+
+      for (const child of children) {
+        if (child.nodeType === Node.TEXT_NODE ||
+          (child.nodeType === Node.ELEMENT_NODE &&
+            !['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'UL', 'OL', 'BLOCKQUOTE'].includes((child as Element).tagName))) {
+          // Wrap in a paragraph
+          if (!currentP) {
+            currentP = document.createElement('p');
+            currentP.style.lineHeight = '1.5';
+            fragment.appendChild(currentP);
+          }
+          currentP.appendChild(child.cloneNode(true));
+        } else {
+          // Block element - add as is
+          currentP = null;
+          const blockElem = child.cloneNode(true) as HTMLElement;
+          if (!blockElem.style.lineHeight) {
+            blockElem.style.lineHeight = '1.5';
+          }
+          fragment.appendChild(blockElem);
+        }
+      }
+
+      // Save cursor position
+      const selection = window.getSelection();
+      const savedSelection = selection && selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
+
+      editorRef.current.innerHTML = '';
+      editorRef.current.appendChild(fragment);
+
+      // Restore cursor position if possible
+      if (savedSelection && selection) {
+        try {
+          selection.removeAllRanges();
+          selection.addRange(savedSelection);
+        } catch (e) {
+          // Silently fail if restoration doesn't work
+        }
+      }
+    }
+  }, []);
+
   // Load saved content on mount
   useEffect(() => {
     const savedContent = localStorage.getItem('documentContent');
     if (savedContent && editorRef.current) {
       editorRef.current.innerHTML = savedContent;
-      requestAnimationFrame(() => hydrateSearchResultImages(editorRef.current));
+      requestAnimationFrame(() => {
+        hydrateSearchResultImages(editorRef.current);
+        normalizeContent();
+      });
     }
-  }, [hydrateSearchResultImages]);
+  }, [hydrateSearchResultImages, normalizeContent]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -142,6 +236,8 @@ export function DocumentEditor() {
     document.execCommand(command, false, value);
     editorRef.current?.focus();
   };
+
+
 
   const handleModelChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     setSelectedModel(event.target.value);
@@ -457,8 +553,79 @@ export function DocumentEditor() {
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && !isClickInSelection(e.clientX, e.clientY)) {
       // Allow browser to handle deselection
+      return;
+    }
+
+    // Normalize content: ensure all text is wrapped in block elements (p tags)
+    if (editorRef.current) {
+      const children = Array.from(editorRef.current.childNodes);
+      let needsNormalization = false;
+
+      // Check if there are any text nodes or inline elements at the root level
+      for (const child of children) {
+        if (child.nodeType === Node.TEXT_NODE && child.textContent?.trim()) {
+          needsNormalization = true;
+          break;
+        }
+        if (child.nodeType === Node.ELEMENT_NODE) {
+          const elem = child as Element;
+          if (!['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'UL', 'OL', 'LI'].includes(elem.tagName)) {
+            needsNormalization = true;
+            break;
+          }
+        }
+      }
+
+      if (needsNormalization) {
+        const fragment = document.createDocumentFragment();
+        let currentP: HTMLParagraphElement | null = null;
+
+        for (const child of children) {
+          if (child.nodeType === Node.TEXT_NODE ||
+            (child.nodeType === Node.ELEMENT_NODE &&
+              !['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'UL', 'OL'].includes((child as Element).tagName))) {
+            // Wrap in a paragraph
+            if (!currentP) {
+              currentP = document.createElement('p');
+              currentP.style.lineHeight = '1.5';
+              fragment.appendChild(currentP);
+            }
+            currentP.appendChild(child.cloneNode(true));
+          } else {
+            // Block element - add as is
+            currentP = null;
+            const blockElem = child.cloneNode(true) as HTMLElement;
+            if (!blockElem.style.lineHeight) {
+              blockElem.style.lineHeight = '1.5';
+            }
+            fragment.appendChild(blockElem);
+          }
+        }
+
+        // Save cursor position
+        const savedSelection = selection && selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
+
+        editorRef.current.innerHTML = '';
+        editorRef.current.appendChild(fragment);
+
+        // Restore cursor position if possible
+        if (savedSelection && selection) {
+          try {
+            selection.removeAllRanges();
+            selection.addRange(savedSelection);
+          } catch (e) {
+            // If restoration fails, place cursor at end
+            const range = document.createRange();
+            range.selectNodeContents(editorRef.current);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+        }
+      }
     }
   };
+
 
   const insertStyledText = (text: string) => {
     const selection = window.getSelection();
@@ -698,6 +865,7 @@ export function DocumentEditor() {
           <button onClick={() => handleFormat('insertUnorderedList')} className="p-1.5 hover:text-gray-700 transition-colors" title="Bullet List"><List className="w-4 h-4" style={{ transform: 'scale(1.1)' }} /></button>
           <button onClick={() => handleFormat('insertOrderedList')} className="p-1.5 hover:text-gray-700 transition-colors" title="Numbered List"><ListOrdered className="w-4 h-4" style={{ transform: 'scale(1.1)' }} /></button>
           <div className="w-3" />
+
           <button type="button" className="p-1.5 hover:text-gray-700 transition-colors disabled:opacity-50" title="AI Review (Cmd+Enter)" disabled={aiLoading} aria-label="AI Review" onClick={handleAiReview}>
             {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : <Sparkles className="w-4 h-4" aria-hidden />}
           </button>
@@ -771,7 +939,7 @@ export function DocumentEditor() {
               <div className="relative flex-shrink-0 group" onMouseDown={handleDividerMouseDown}>
                 <div className="absolute inset-0 w-4 -ml-2 cursor-col-resize z-10" />
                 <div className="h-full w-px bg-gray-300 group-hover:bg-gray-500 transition-colors">
-                  <Vector59 />
+                  <div className="w-full h-full bg-gradient-to-b from-transparent via-[#E1E1E1] to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
                 </div>
               </div>
             )}
@@ -783,7 +951,7 @@ export function DocumentEditor() {
             ref={editorRef}
             contentEditable
             suppressContentEditableWarning
-            className="min-h-screen bg-white p-8 focus:outline-none prose prose-lg max-w-3xl mx-auto font-normal"
+            className="min-h-screen bg-white p-8 focus:outline-none prose prose-lg max-w-3xl mx-auto font-normal [&_p]:my-0 [&_p]:min-h-[1.5em]"
             spellCheck
             onMouseDown={handleMouseDown}
             onClick={handleClick}
@@ -801,7 +969,7 @@ export function DocumentEditor() {
               <div className="relative flex-shrink-0 group" onMouseDown={handleDividerMouseDown}>
                 <div className="absolute inset-0 w-4 -ml-2 cursor-col-resize z-10" />
                 <div className="h-full w-px bg-gray-300 group-hover:bg-gray-500 transition-colors">
-                  <Vector59 />
+                  <div className="w-full h-full bg-gradient-to-b from-transparent via-[#E1E1E1] to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
                 </div>
               </div>
             )}
@@ -820,6 +988,8 @@ export function DocumentEditor() {
           </>
         )}
       </div>
+
+      <LineHeightHandle editorRef={editorRef} />
     </div>
   );
 }

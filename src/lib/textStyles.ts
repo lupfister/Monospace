@@ -59,9 +59,6 @@ export const createAiTextWithLinksFragment = (text: string, lineHeight?: string)
 
     // Use the unified styled source link for the markdown link
     const linkComponent = createStyledSourceLink(url, label);
-    // Add small margins to separate from surrounding text
-    linkComponent.style.marginLeft = '4px';
-    linkComponent.style.marginRight = '4px';
     fragment.appendChild(linkComponent);
 
     lastIndex = MARKDOWN_LINK.lastIndex;
@@ -91,10 +88,10 @@ export const createStyledSourceLink = (url: string, label: string): HTMLElement 
   wrapper.style.margin = '0';
   wrapper.style.transition = 'background-color 0.15s ease';
   wrapper.style.cursor = 'default';
-  wrapper.style.lineHeight = '0';
+  wrapper.style.lineHeight = '1.5';
   wrapper.style.verticalAlign = 'middle';
-  wrapper.style.height = '1.2em';
-  wrapper.style.maxWidth = '320px'; // Prevent very long links from breaking layout
+  // wrapper.style.height = '1.2em'; // Removed fixed height for natural flow
+  wrapper.style.maxWidth = '480px'; // Prevent very long links from breaking layout, but allow more title visibility
   wrapper.style.overflow = 'hidden';
 
   // Hover effect
@@ -130,7 +127,7 @@ export const createStyledSourceLink = (url: string, label: string): HTMLElement 
   textSpan.style.fontSize = '18px';
   textSpan.style.fontWeight = '350';
   textSpan.style.fontVariationSettings = '"wght" 350';
-  textSpan.style.lineHeight = '1';
+  textSpan.style.lineHeight = '1.5';
   textSpan.style.cursor = 'text';
   textSpan.style.whiteSpace = 'nowrap';
   textSpan.style.overflow = 'hidden';

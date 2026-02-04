@@ -38,6 +38,7 @@ export function useSearchAgent(
 
             // 1. Plan Search
             const plan = await planSearchWithGemini(trimmedText, selectedModel);
+            console.log('[useSearchAgent] Plan:', plan);
 
             let searchResults: any[] = [];
             let searchContext: string | undefined = undefined;
@@ -52,6 +53,7 @@ export function useSearchAgent(
 
                 try {
                     searchResults = await searchWithAgent(agentQueries, selectedModel);
+                    console.log('[useSearchAgent] Search Results:', searchResults);
                     if (searchResults.length > 0) {
                         // Prepare context for the narrative agent
                         searchContext = searchResults.map(r => `Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet || ''}`).join('\n\n');
@@ -81,18 +83,13 @@ export function useSearchAgent(
 
                 // 3. Render integrated block
                 const resultItems = orderedSearchResultsToItems(searchResults as any);
-                const resultsBlock = await buildSearchResultsBlock(resultItems, notes);
+                const resultsFragment = await buildSearchResultsBlock(resultItems, notes);
 
                 // 4. Insert into editor
                 if (range) {
                     range.collapse(false); // Insert after selection
-                    const wrapper = document.createDocumentFragment();
-                    wrapper.appendChild(document.createElement('br'));
-                    wrapper.appendChild(resultsBlock);
-                    const spacer = document.createElement('p');
-                    spacer.appendChild(document.createElement('br'));
-                    wrapper.appendChild(spacer);
-                    range.insertNode(wrapper);
+                    // Simply insert the fragment. It contains proper blocks (p/div) and spacers.
+                    range.insertNode(resultsFragment);
                 } else {
                     const lastChild = editorRef.current.lastChild;
                     const newRange = document.createRange();
@@ -102,13 +99,7 @@ export function useSearchAgent(
                         newRange.setStart(editorRef.current, 0);
                     }
                     newRange.collapse(true);
-                    const br = document.createElement('br');
-                    newRange.insertNode(br);
-                    newRange.setStartAfter(br);
-                    newRange.insertNode(resultsBlock);
-                    const spacer = document.createElement('p');
-                    spacer.appendChild(document.createElement('br'));
-                    resultsBlock.after(spacer);
+                    newRange.insertNode(resultsFragment);
                 }
 
                 hydrateSearchResultImages(editorRef.current);

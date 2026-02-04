@@ -124,14 +124,20 @@ type Block =
 type Output = { blocks: Block[] };
 
 Output order (strict):
-1. Information section first: exactly ONE "ai" block with a single paragraph (2–4 sentences max). Include teaching content, facts, and context. Keep it concise and readable. If a relevant article adds value, include ONE additional "ai" block that is a short excerpt (1–2 sentences max) and include a markdown link in that excerpt, e.g. [article title or description](https://example.com).
-2. Questions last: one or more "input" blocks only. Each must be a genuine question that takes the learning in a new, unexpected direction—not recap, not obvious follow-ups. Use "input" blocks: prompt is shown in gray; then render exactly "lines" empty user lines to fill in (use 1–4).
+1. Information section first: exactly ONE "ai" block with a single paragraph (2–4 sentences max). Prioritize novel information and "serendipitous" finds. Connect the user's input to broader concepts, historical echoes, or unexpected technical parallels.
+2. Questions last: 1–3 "input" blocks. Only ask questions that are truly thought-provoking and add significant value. If only one question is worth asking, output only one. Do NOT force 3 questions. These questions must NOT feel like a quiz. They should feel like a late-night conversation with a polymath. 
+   - Each question should probe the user's personal intuition, a philosophical implication, or a cross-disciplinary connection (e.g., "How does this biological pattern remind you of how you organize your own digital life?").
+   - Avoid "What," "How," or "Why" questions that can be answered by the provided text.
+   - Seek "lateral" questions: if the topic is physics, ask about architecture; if the topic is history, ask about future psychology.
+   - Use "input" blocks: prompt is shown in gray; then render exactly "lines" empty user lines to fill in (use 2–4 for depth).
 
 Rules:
 - Do NOT output any text that says "Video link:", "Image link:", or raw URLs. The app inserts media blocks above your response.
 - Do NOT add a "Summary" section unless the user's text explicitly asks for one.
-- Do NOT output more than two "ai" blocks total.
-- If the user's text asks a question, answer it in the information section (as an "ai" block) and still end with 1–3 open-ended questions that open new directions.
+- Do NOT output more than ONE "ai" block total.
+- Do NOT include any markdown links (e.g. [text](url)) in the output text. This is a strict rule.
+- Do NOT reference external articles or "read more" links in your text. Provide the information directly.
+- If the user's text asks a question, answer it in the information section (as an "ai" block) and still end with these serendipitous questions.
 - Keep total blocks <= 12.
 
 After the JSON, if you think web search results would be helpful, append ONE tag on a new line (outside JSON):
@@ -139,17 +145,16 @@ After the JSON, if you think web search results would be helpful, append ONE tag
 - [SEARCH_ARTICLES: query]
 - [SEARCH_IMAGES: query]
 - [SEARCH_ALL: query]
-Only add a tag if external content would genuinely add value.
+Only add a tag if external content would genuinely add value.`;
 
-  const finalPrompt = `${ prompt }
+  const finalPrompt = `${prompt}
 
-${
-    searchContext ? `Context from web search (incorporate relevant findings into the information section where helpful, but do not explicitly cite "search results"):
+${searchContext ? `Context from web search (incorporate relevant findings into the information section where helpful, but do not explicitly cite "search results"):
 ${searchContext}` : ''
-  }
+    }
 
 User's text:
-${ t } `;
+${t} `;
 
   return runBasicAgent(
     'You are a note-taking assistant that outputs ONLY JSON matching the specified TypeScript type, optionally followed by a single [SEARCH_*] tag.',
@@ -165,37 +170,35 @@ export const handlePlanSearch = async (text: string, model?: string | null): Pro
 
   const t = text.slice(0, 4000);
 
-  const prompt = `You are a search planning assistant for a writing app.
-Decide if web retrieval would add meaningful value.If yes, output up to 3 searches.
+  const prompt = `You are an Expert Search Strategist. Your goal is to maximize "serendipity"—finding content that connects the user's text to unexpected fields, history, or future possibilities. Avoid the obvious.
 
-Return ONLY valid JSON matching this TypeScript type:
-  type Plan = {
-    shouldSearch: boolean;
-    queries: Array<{ type: "web" | "image" | "video"; query: string; reason?: string }>;
-  };
+Analyze the user's text and craft up to 3 strategic queries.
 
-  Rules:
-  - If the text is self - contained, set shouldSearch = false and queries = []
-    - Queries must be concrete(include key nouns, versions, dates, or context)
-      - Make queries specific and interesting, not generic("pixabay", "stock photo", or "wikipedia" is too generic)
-        - Prefer high - signal, reputable, or surprising sources the user can react to
-          - Prefer "web" unless the user would benefit specifically from visuals or videos
-            - For type "image": use queries that ask for contextually relevant visuals(e.g. "Microsoft Word .doc file icon screenshot", "Word document format diagram") so results are real screenshots, icons, or diagrams—not generic words like "doc" or "document" which return conversion - tool logos and lettermarks.
-- Don't include markdown, commentary, or code fences; JSON only
+Return ONLY valid JSON:
+type Plan = {
+  shouldSearch: boolean;
+  queries: Array<{ type: "web" | "image" | "video"; query: string; reason?: string }>;
+};
 
-  Text:
-${ t } `;
+GOALS BY TYPE:
+• IMAGE: Find diagrams, technical illustrations, data visualizations, or vivid high-quality photos. Look for visual clarity that helps "see" the concept.
+• VIDEO: Find expert demonstrations, lectures, educational documentaries, or technical deep-dives. Look for authoritative sources.
+• WEB (Article): Find primary sources, surprising research findings, or in-depth analysis from reputable institutions. Look for content that provides substantive context and "rabbit holes" to explore.
+
+Text to analyze:
+${t}`;
 
   const agent = new Agent({
     name: 'SearchPlanner',
     instructions:
-      'You decide whether web search is useful and propose up to 3 concrete search queries. You must return strict JSON per the provided Plan type and nothing else.',
+      'You are a proactive research assistant. You default to searching (shouldSearch: true) unless the request is trivial or purely creative writing. You must return strict JSON per the provided Plan type and nothing else.',
     model: modelToUse,
   });
 
   const result = await run(agent, prompt);
   const output = (result as any).finalOutput;
   const raw = typeof output === 'string' ? output.trim() : String(output ?? '').trim();
+  console.log('[SearchPlanner] Raw output:', raw);
 
   try {
     const parsed = JSON.parse(raw);
@@ -204,7 +207,8 @@ ${ t } `;
       return { shouldSearch: false, queries: [] };
     }
     return validated.data;
-  } catch {
+  } catch (e) {
+    console.error('[SearchPlanner] Error:', e);
     return { shouldSearch: false, queries: [] };
   }
 };
@@ -298,28 +302,28 @@ const extractJsonFromOutput = (output: unknown): unknown => {
   const withoutFence = trimmed
     .replace(/^```(?: json) ?\s */i, '')
     .replace(/```$/i, '')
-  .trim();
+    .trim();
 
-const parseWithCleanup = (value: string) => {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return JSON.parse(normalizeJsonText(value));
+  const parseWithCleanup = (value: string) => {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return JSON.parse(normalizeJsonText(value));
+    }
+  };
+
+  if (withoutFence.startsWith('{') || withoutFence.startsWith('[')) {
+    return parseWithCleanup(withoutFence);
   }
-};
 
-if (withoutFence.startsWith('{') || withoutFence.startsWith('[')) {
+  const firstBrace = withoutFence.indexOf('{');
+  const lastBrace = withoutFence.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const candidate = withoutFence.slice(firstBrace, lastBrace + 1);
+    return parseWithCleanup(candidate);
+  }
+
   return parseWithCleanup(withoutFence);
-}
-
-const firstBrace = withoutFence.indexOf('{');
-const lastBrace = withoutFence.lastIndexOf('}');
-if (firstBrace >= 0 && lastBrace > firstBrace) {
-  const candidate = withoutFence.slice(firstBrace, lastBrace + 1);
-  return parseWithCleanup(candidate);
-}
-
-return parseWithCleanup(withoutFence);
 };
 
 const runSearchAgentForQuery = async (
@@ -332,39 +336,60 @@ const runSearchAgentForQuery = async (
   const agent = new Agent({
     name: 'WebSearchAgent',
     instructions:
-      'You are a search assistant. Use the hosted web_search tool to gather relevant, specific, and interesting results for the provided query. Avoid generic or low-signal sources (stock image sites, content farms, or thin aggregator pages). Prefer high-quality sources that add depth and are likely to prompt a user reaction. Include a short excerpt in "snippet" whenever possible. For image-type queries: return only pages whose main image is contextually relevant to the topic—e.g. screenshots, icons, software UI, diagrams, or real photos of the subject. The goal is to find a page that contains a high-quality image of the subject. Do NOT return document-converter or file-conversion tool landing pages, logo/lettermark pages, or marketing pages; skip any result where the primary image would be a logo, lettermark, or tool branding. Prefer Wikipedia, official product pages, or educational articles that show the actual thing (file icon, screenshot, diagram). Return the page URL in "url"; the server will extract a real image from the page. If a search result clearly shows a direct image URL (e.g. ending in .jpg, .png), put it in "thumbnail" and "url". After you gather results, respond with JSON that matches { "results": [ { "title": string, "url": string, "snippet"?: string, "thumbnail"?: string } ] }. Limit to 5 entries, and do not include any surrounding explanation.',
+      'You are an Expert Research Agent. Your goal is to find high-signal, interesting, and authoritative content to embed in a professional document.\n\n' +
+      'FOR IMAGES:\n' +
+      '• Target diagrams, infographics, historical photos, or technical screenshots.\n' +
+      '• Avoid generic icons, logos, or stock photos.\n' +
+      '• Find pages where the primary image is contextually rich.\n\n' +
+      'FOR VIDEOS:\n' +
+      '• Target educational content, experts, or primary demonstrations.\n' +
+      '• Ensure the source is reputable (universities, experts, official channels).\n\n' +
+      'FOR ARTICLES (WEB):\n' +
+      '• Target primary sources or surprising expert findings.\n' +
+      '• EXTRACT A DIRECT QUOTE: For the "snippet", copy 1-2 interesting sentences directly from the source. Do NOT summarize.\n\n' +
+      'OUTPUT:\n' +
+      'Return JSON: { "results": [ { "title": string, "url": string, "snippet"?: string, "thumbnail"?: string } ] }\n' +
+      'Limit to 5 results.',
     tools: [webSearchTool()],
     model: modelToUse,
   });
 
   const prompt = `Search Type: ${query.type}
 Search Query: ${query.query}
-Return ONLY the required JSON structure (no extra text). Output must be valid JSON on a single line (no code fences). Escape any newlines in snippets.`;
-
-  const result = await run(agent, prompt);
-  const output = (result as any).finalOutput;
-  let parsed: unknown;
+Return ONLY the required JSON structure (no extra text). Output must be valid JSON on a single line (no code fences). Escape any newlines in snippets. Ensure you call the web_search tool to get real results first.`;
 
   try {
-    parsed = extractJsonFromOutput(output);
-  } catch (error) {
-    throw new Error(
-      `Search agent returned invalid JSON for "${query.query}": ${error instanceof Error ? error.message : String(error)
-      }`
-    );
-  }
+    const result = await run(agent, prompt);
+    const output = (result as any).finalOutput;
+    console.log(`[SearchAgent] Raw output for "${query.query}":`, output);
 
-  const validation = AGENT_SEARCH_RESPONSE_SCHEMA.safeParse(parsed);
-  if (!validation.success) {
-    throw new Error(
-      `Search agent validation failed: ${validation.error.issues.map((issue) => issue.message).join('; ')}`
-    );
-  }
+    let parsed: unknown;
+    try {
+      parsed = extractJsonFromOutput(output);
+    } catch (error) {
+      console.error(`[SearchAgent] JSON parse failed for "${query.query}":`, output);
+      // Fallback: try to see if the agent returned a string that looks like an error
+      throw new Error(
+        `Search agent returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
 
-  return validation.data.results.map((item) => ({
-    type: query.type,
-    ...item,
-  }));
+    const validation = AGENT_SEARCH_RESPONSE_SCHEMA.safeParse(parsed);
+    if (!validation.success) {
+      console.error(`[SearchAgent] Schema validation failed for "${query.query}":`, validation.error);
+      throw new Error(
+        `Search agent validation failed: ${validation.error.issues.map((issue) => issue.message).join('; ')}`
+      );
+    }
+
+    return validation.data.results.map((item) => ({
+      type: query.type,
+      ...item,
+    }));
+  } catch (err) {
+    console.error(`[SearchAgent] run failed for "${query.query}":`, err);
+    throw err;
+  }
 };
 
 export const handleAgentSearch = async (

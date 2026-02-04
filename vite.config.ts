@@ -6,7 +6,7 @@ import path from 'path';
 export default defineConfig(({ mode }) => {
   // Load env vars
   const env = loadEnv(mode, process.cwd(), '');
-  
+
   return {
     plugins: [react()],
     resolve: {
@@ -55,7 +55,7 @@ export default defineConfig(({ mode }) => {
     },
     build: {
       target: 'esnext',
-      outDir: 'build',
+      outDir: 'dist',
     },
     server: {
       port: 3000,

@@ -31,6 +31,15 @@ export interface GeminiGenerateResult {
   ok: true;
 }
 
+export type SkeletonNoteBlock =
+  | { kind: 'ai'; text: string }
+  | { kind: 'input'; prompt: string; lines: number };
+
+export interface SkeletonNotes {
+  blocks: SkeletonNoteBlock[];
+  searchTag?: string; // e.g. [SEARCH_ALL: query]
+}
+
 export interface GeminiErrorResult {
   ok: false;
   error: string;
@@ -49,6 +58,7 @@ const postAiAction = async <TResponse>(body: {
   action: AiAction;
   text: string;
   model?: string | null;
+  searchContext?: unknown;
 }): Promise<TResponse> => {
   try {
     const res = await fetch('/api/ai/action', {
@@ -99,6 +109,53 @@ export const generateWithGemini = async (
     }
 
     return { ok: true, text: data.text };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: message };
+  }
+};
+
+export const fetchSkeletonNotesWithGemini = async (
+  text: string,
+  model?: string | null,
+  searchContext?: unknown,
+): Promise<{ ok: boolean; notes?: SkeletonNotes; error?: string }> => {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { ok: false, error: 'No text provided.' };
+  }
+
+  try {
+    const data = await postAiAction<{ ok: boolean; text: string }>({
+      action: 'review',
+      text: trimmed,
+      model: model ?? undefined,
+      ...(searchContext ? { searchContext } : {}),
+    });
+
+    if (!data.ok || !data.text) {
+      return { ok: false, error: 'Empty response from AI.' };
+    }
+
+    // Parse the output which is JSON followed by an optional search tag
+    const textOutput = data.text;
+    const jsonEndIndex = textOutput.lastIndexOf('}') + 1;
+    const jsonPart = textOutput.slice(0, jsonEndIndex).trim();
+    const tagPart = textOutput.slice(jsonEndIndex).trim();
+
+    try {
+      const parsed = JSON.parse(jsonPart) as { blocks: SkeletonNoteBlock[] };
+      return {
+        ok: true,
+        notes: {
+          blocks: parsed.blocks || [],
+          searchTag: tagPart || undefined,
+        },
+      };
+    } catch (e) {
+      console.error('Failed to parse skeleton notes JSON:', e, 'Raw output:', textOutput);
+      return { ok: false, error: 'Invalid response format from AI.' };
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { ok: false, error: message };
@@ -190,4 +247,15 @@ export const searchWithAgent = async (
 
   return data.results;
 };
+
+/**
+ * OpenAI model IDs that support the Agents API and hosted web search
+ * (GPT-4o and GPT-4.1 series). Ordered by price ascending (cheapest first).
+ * Rough per-1M tokens: 4o-mini $0.15/$0.60, 4.1-mini $0.80/$3.20, 4.1 $2/$8.
+ */
+export const OPENAI_MODEL_OPTIONS: readonly string[] = [
+  'gpt-4o-mini',
+  'gpt-4.1-mini',
+  'gpt-4.1',
+];
 

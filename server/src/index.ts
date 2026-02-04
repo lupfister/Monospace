@@ -54,7 +54,8 @@ app.post('/api/ai/action', async (req: any, res: any) => {
     }
 
     if (action === 'review') {
-      const resultText = await handleReviewSkeletonNotes(text, model);
+      const searchContext = (req.body as any).searchContext;
+      const resultText = await handleReviewSkeletonNotes(text, model, searchContext);
       return res.json({ ok: true, text: resultText });
     }
 

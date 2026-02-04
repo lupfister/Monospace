@@ -41,7 +41,7 @@ export const createAiTextSpan = (text: string, lineHeight?: string): HTMLSpanEle
 const MARKDOWN_LINK = /\[([^\]]*)\]\(([^)]+)\)/g;
 
 /**
- * Creates a DocumentFragment with AI-styled text and clickable links for [label](url) patterns.
+ * Creates a DocumentFragment with AI-styled text and unified styled source links for [label](url) patterns.
  */
 export const createAiTextWithLinksFragment = (text: string, lineHeight?: string): DocumentFragment => {
   const fragment = document.createDocumentFragment();
@@ -54,20 +54,16 @@ export const createAiTextWithLinksFragment = (text: string, lineHeight?: string)
       const span = createAiTextSpan(before, lineHeight);
       fragment.appendChild(span);
     }
-    const label = match[1] || match[2];
+    const label = (match[1] || match[2]).trim();
     const url = match[2].trim();
-    const a = document.createElement('a');
-    a.href = url;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    a.textContent = label;
-    a.style.color = AI_TEXT_STYLE.color;
-    a.style.fontFamily = AI_TEXT_STYLE.fontFamily;
-    a.style.fontSize = AI_TEXT_STYLE.fontSize;
-    a.style.fontWeight = String(AI_TEXT_STYLE.fontWeight);
-    a.style.textDecoration = 'underline';
-    a.style.cursor = 'pointer';
-    fragment.appendChild(a);
+
+    // Use the unified styled source link for the markdown link
+    const linkComponent = createStyledSourceLink(url, label);
+    // Add small margins to separate from surrounding text
+    linkComponent.style.marginLeft = '4px';
+    linkComponent.style.marginRight = '4px';
+    fragment.appendChild(linkComponent);
+
     lastIndex = MARKDOWN_LINK.lastIndex;
   }
   if (lastIndex === 0) {
@@ -80,6 +76,84 @@ export const createAiTextWithLinksFragment = (text: string, lineHeight?: string)
   }
   return fragment;
 };
+
+/**
+ * Creates a unified AI source/link component with a gray highlight,
+ * a left-aligned 'open' arrow icon, and AI-styled text.
+ */
+export const createStyledSourceLink = (url: string, label: string): HTMLElement => {
+  const wrapper = document.createElement('span');
+  wrapper.style.display = 'inline-flex';
+  wrapper.style.alignItems = 'center';
+  wrapper.style.backgroundColor = 'var(--color-gray-100, #f3f4f6)';
+  wrapper.style.borderRadius = '4px';
+  wrapper.style.padding = '0px 5px';
+  wrapper.style.margin = '0';
+  wrapper.style.transition = 'background-color 0.15s ease';
+  wrapper.style.cursor = 'default';
+  wrapper.style.lineHeight = '0';
+  wrapper.style.verticalAlign = 'middle';
+  wrapper.style.height = '1.2em';
+  wrapper.style.maxWidth = '320px'; // Prevent very long links from breaking layout
+  wrapper.style.overflow = 'hidden';
+
+  // Hover effect
+  wrapper.onmouseenter = () => { wrapper.style.backgroundColor = 'var(--color-gray-200, #e5e7eb)'; };
+  wrapper.onmouseleave = () => { wrapper.style.backgroundColor = 'var(--color-gray-100, #f3f4f6)'; };
+
+  // Icon (Left) - External Link
+  const iconSpan = document.createElement('span');
+  iconSpan.style.display = 'inline-flex';
+  iconSpan.style.alignItems = 'center';
+  iconSpan.style.justifyContent = 'center';
+  iconSpan.style.marginRight = '6px';
+  iconSpan.style.cursor = 'pointer';
+  iconSpan.style.flexShrink = '0';
+  iconSpan.contentEditable = 'false';
+
+  // Inline style on SVG to counter global "svg { display: block }" in index.css
+  iconSpan.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6e6e6e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: inline; vertical-align: middle;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
+
+  const openLink = (e: MouseEvent | KeyboardEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  iconSpan.onclick = openLink;
+
+  // Text - use exact AI text style
+  const textSpan = document.createElement('span');
+  textSpan.textContent = label;
+  textSpan.style.color = '#6e6e6e';
+  textSpan.style.fontFamily = 'Inter, sans-serif';
+  textSpan.style.fontSize = '18px';
+  textSpan.style.fontWeight = '350';
+  textSpan.style.fontVariationSettings = '"wght" 350';
+  textSpan.style.lineHeight = '1';
+  textSpan.style.cursor = 'text';
+  textSpan.style.whiteSpace = 'nowrap';
+  textSpan.style.overflow = 'hidden';
+  textSpan.style.textOverflow = 'ellipsis';
+  textSpan.style.flex = '1';
+  textSpan.style.minWidth = '0';
+
+  wrapper.appendChild(iconSpan);
+  wrapper.appendChild(textSpan);
+
+  // Accessibility and keyboard support
+  wrapper.setAttribute('role', 'link');
+  wrapper.setAttribute('aria-label', `Open source: ${label}`);
+  wrapper.tabIndex = 0;
+  wrapper.onkeydown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      openLink(e);
+    }
+  };
+
+  return wrapper;
+};
+
 
 /**
  * Creates a span element with human/user text styling

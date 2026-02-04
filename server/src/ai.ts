@@ -112,7 +112,7 @@ export const handleExpand = async (text: string, model?: string | null): Promise
   );
 };
 
-export const handleReviewSkeletonNotes = async (text: string, model?: string | null): Promise<string> => {
+export const handleReviewSkeletonNotes = async (text: string, model?: string | null, searchContext?: string): Promise<string> => {
   const t = text.slice(0, 4000);
 
   const prompt = `You are writing "skeleton notes" for a document editor. The app will display content in this order: (1) images and video embeds (inserted by the app from search), (2) your information section, (3) your questions. You must output ONLY the information section and the questions. Do NOT output "Video link:", "Image link:", or any raw URLs. Do NOT describe or reference specific videos or images—the app inserts those above your response.
@@ -141,12 +141,19 @@ After the JSON, if you think web search results would be helpful, append ONE tag
 - [SEARCH_ALL: query]
 Only add a tag if external content would genuinely add value.
 
+  const finalPrompt = `${ prompt }
+
+${
+    searchContext ? `Context from web search (incorporate relevant findings into the information section where helpful, but do not explicitly cite "search results"):
+${searchContext}` : ''
+  }
+
 User's text:
-${t}`;
+${ t } `;
 
   return runBasicAgent(
     'You are a note-taking assistant that outputs ONLY JSON matching the specified TypeScript type, optionally followed by a single [SEARCH_*] tag.',
-    prompt,
+    finalPrompt,
     model,
   );
 };
@@ -159,25 +166,25 @@ export const handlePlanSearch = async (text: string, model?: string | null): Pro
   const t = text.slice(0, 4000);
 
   const prompt = `You are a search planning assistant for a writing app.
-Decide if web retrieval would add meaningful value. If yes, output up to 3 searches.
+Decide if web retrieval would add meaningful value.If yes, output up to 3 searches.
 
 Return ONLY valid JSON matching this TypeScript type:
-type Plan = {
-  shouldSearch: boolean;
-  queries: Array<{ type: "web" | "image" | "video"; query: string; reason?: string }>;
-};
+  type Plan = {
+    shouldSearch: boolean;
+    queries: Array<{ type: "web" | "image" | "video"; query: string; reason?: string }>;
+  };
 
-Rules:
-- If the text is self-contained, set shouldSearch=false and queries=[]
-- Queries must be concrete (include key nouns, versions, dates, or context)
-- Make queries specific and interesting, not generic ("pixabay", "stock photo", or "wikipedia" is too generic)
-- Prefer high-signal, reputable, or surprising sources the user can react to
-- Prefer "web" unless the user would benefit specifically from visuals or videos
-- For type "image": use queries that ask for contextually relevant visuals (e.g. "Microsoft Word .doc file icon screenshot", "Word document format diagram") so results are real screenshots, icons, or diagrams—not generic words like "doc" or "document" which return conversion-tool logos and lettermarks.
+  Rules:
+  - If the text is self - contained, set shouldSearch = false and queries = []
+    - Queries must be concrete(include key nouns, versions, dates, or context)
+      - Make queries specific and interesting, not generic("pixabay", "stock photo", or "wikipedia" is too generic)
+        - Prefer high - signal, reputable, or surprising sources the user can react to
+          - Prefer "web" unless the user would benefit specifically from visuals or videos
+            - For type "image": use queries that ask for contextually relevant visuals(e.g. "Microsoft Word .doc file icon screenshot", "Word document format diagram") so results are real screenshots, icons, or diagrams—not generic words like "doc" or "document" which return conversion - tool logos and lettermarks.
 - Don't include markdown, commentary, or code fences; JSON only
 
-Text:
-${t}`;
+  Text:
+${ t } `;
 
   const agent = new Agent({
     name: 'SearchPlanner',
@@ -289,30 +296,30 @@ const extractJsonFromOutput = (output: unknown): unknown => {
   if (!trimmed) return trimmed;
 
   const withoutFence = trimmed
-    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/^```(?: json) ?\s */i, '')
     .replace(/```$/i, '')
-    .trim();
+  .trim();
 
-  const parseWithCleanup = (value: string) => {
-    try {
-      return JSON.parse(value);
-    } catch {
-      return JSON.parse(normalizeJsonText(value));
-    }
-  };
-
-  if (withoutFence.startsWith('{') || withoutFence.startsWith('[')) {
-    return parseWithCleanup(withoutFence);
+const parseWithCleanup = (value: string) => {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return JSON.parse(normalizeJsonText(value));
   }
+};
 
-  const firstBrace = withoutFence.indexOf('{');
-  const lastBrace = withoutFence.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    const candidate = withoutFence.slice(firstBrace, lastBrace + 1);
-    return parseWithCleanup(candidate);
-  }
-
+if (withoutFence.startsWith('{') || withoutFence.startsWith('[')) {
   return parseWithCleanup(withoutFence);
+}
+
+const firstBrace = withoutFence.indexOf('{');
+const lastBrace = withoutFence.lastIndexOf('}');
+if (firstBrace >= 0 && lastBrace > firstBrace) {
+  const candidate = withoutFence.slice(firstBrace, lastBrace + 1);
+  return parseWithCleanup(candidate);
+}
+
+return parseWithCleanup(withoutFence);
 };
 
 const runSearchAgentForQuery = async (

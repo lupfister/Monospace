@@ -71,8 +71,8 @@ const extractMetaContent = (html: string, patterns: RegExp[]): string | null => 
     // Handle both quoted and unquoted content attributes
     let content = raw;
     // Remove surrounding quotes if present
-    if ((content.startsWith('"') && content.endsWith('"')) || 
-        (content.startsWith("'") && content.endsWith("'"))) {
+    if ((content.startsWith('"') && content.endsWith('"')) ||
+      (content.startsWith("'") && content.endsWith("'"))) {
       content = content.slice(1, -1);
     }
     return decodeHtmlEntities(content);
@@ -95,7 +95,7 @@ const fetchHtmlViaJina = async (url: string): Promise<string> => {
   try {
     // NOTE: r.jina.ai expects the raw URL after the slash (do NOT encode it).
     const target = `https://r.jina.ai/${url}`;
-    const res = await fetch(target, { 
+    const res = await fetch(target, {
       method: 'GET',
       headers: {
         'Accept': 'text/html,application/xhtml+xml',
@@ -113,7 +113,7 @@ const fetchHtmlViaJina = async (url: string): Promise<string> => {
     console.warn('Jina.ai fetch failed, trying direct fetch:', error);
     // Fallback: try direct fetch (may fail due to CORS, but worth trying)
     try {
-      const res = await fetch(url, { 
+      const res = await fetch(url, {
         method: 'GET',
         mode: 'no-cors', // This won't work for reading response, but we try
       });
@@ -200,7 +200,12 @@ export const getLinkPreview = async (rawUrl: string): Promise<LinkPreviewData | 
   return data;
 };
 
+
 export const isProbablyUrl = (text: string): boolean => {
   return normalizeUrl(text) !== null;
+};
+
+export const isImageUrl = (url: string): boolean => {
+  return /\.(jpg|jpeg|png|gif|webp|svg)(\?|$)/i.test(url);
 };
 

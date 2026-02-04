@@ -243,7 +243,11 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ ok: false, error: 'Internal server error.' });
 });
 
-app.listen(PORT, () => {
-  console.log(`AI server listening on http://localhost:${PORT}`);
-});
+export default app;
+
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`AI server listening on http://localhost:${PORT}`);
+  });
+}
 

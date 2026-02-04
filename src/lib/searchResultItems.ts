@@ -1,4 +1,4 @@
-import { WebSearchResults } from './webSearch';
+
 
 export type ResultItemType = 'video' | 'article' | 'image' | 'snippet';
 
@@ -65,71 +65,7 @@ export const getCitationText = (item: ResultItem): string => {
   return item.url || '';
 };
 
-export const normalizeSearchResults = (results: WebSearchResults): ResultItem[] => {
-  const items: ResultItem[] = [];
 
-  results.videos.forEach((video, index) => {
-    const source = video.channel || getHostname(video.url);
-    items.push({
-      id: buildId('video', video.url, index),
-      type: 'video',
-      title: video.title,
-      url: video.url,
-      snippet: video.snippet,
-      thumbnail: video.thumbnail,
-      source,
-    });
-
-    if (video.snippet) {
-      items.push({
-        id: buildId('snippet', video.url, index),
-        type: 'snippet',
-        title: deriveSnippetTitle(source, 'video'),
-        url: video.url,
-        snippet: video.snippet,
-        source,
-      });
-    }
-  });
-
-  results.articles.forEach((article, index) => {
-    const source = article.source || getHostname(article.url);
-    items.push({
-      id: buildId('article', article.url, index),
-      type: 'article',
-      title: article.title,
-      url: article.url,
-      snippet: article.snippet,
-      thumbnail: article.thumbnail,
-      source,
-    });
-
-    if (article.snippet) {
-      items.push({
-        id: buildId('snippet', article.url, index),
-        type: 'snippet',
-        title: deriveSnippetTitle(source, 'article'),
-        url: article.url,
-        snippet: article.snippet,
-        source,
-      });
-    }
-  });
-
-  results.images.forEach((image, index) => {
-    items.push({
-      id: buildId('image', image.url, index),
-      type: 'image',
-      title: image.title,
-      url: image.url,
-      snippet: image.snippet,
-      thumbnail: image.thumbnail,
-      source: getHostname(image.url),
-    });
-  });
-
-  return items;
-};
 
 export type OrderedSearchResult = {
   type: 'video' | 'article' | 'image';

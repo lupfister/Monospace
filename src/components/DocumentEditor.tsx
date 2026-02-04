@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { 
-  Bold, 
-  Italic, 
-  Underline, 
+import {
+  Bold,
+  Italic,
+  Underline,
   List,
   ListOrdered,
   MoveHorizontal,
@@ -40,6 +40,10 @@ const OPENAI_MODEL_OPTIONS: readonly string[] = [
   'gpt-4.1-mini',
   'gpt-4.1',
 ];
+
+const isImageUrl = (url: string): boolean => {
+  return /\.(jpg|jpeg|png|gif|webp|svg)(\?|$)/i.test(url);
+};
 
 export function DocumentEditor() {
   const editorRef = useRef<HTMLDivElement>(null);
@@ -156,10 +160,10 @@ export function DocumentEditor() {
     const urlRow = document.createElement('div');
     urlRow.dataset.part = 'url';
     urlRow.className = 'pt-1';
-    
+
     const urlText = document.createElement('div');
     urlText.className = 'text-sm text-gray-500 truncate';
-    
+
     const urlSpan = document.createElement('span');
     urlSpan.textContent = url;
     urlText.appendChild(urlSpan);
@@ -196,7 +200,7 @@ export function DocumentEditor() {
         if (descEl) descEl.remove();
         return;
       }
-      
+
       if (card.dataset.embed !== 'link-preview') return;
       if (card.dataset.url !== url) return;
 
@@ -233,7 +237,7 @@ export function DocumentEditor() {
         if (urlText) {
           try {
             const u = new URL(url);
-            const displayText = data.siteName 
+            const displayText = data.siteName
               ? `${data.siteName} · ${u.hostname.replace('www.', '')}`
               : u.hostname.replace('www.', '');
             urlText.textContent = displayText;
@@ -512,39 +516,40 @@ export function DocumentEditor() {
         const imageUrl = item.thumbnail || item.url || '';
         if (imageUrl) {
           const img = document.createElement('img');
-          const proxyUrl = `/api/ai/image?url=${encodeURIComponent(imageUrl)}`;
-          // Set proxy URL both as dataset (for hydrate/fallback) and initial src so the browser attempts to load it immediately.
-          img.dataset.proxyUrl = proxyUrl;
-          img.src = proxyUrl;
+          if (isImageUrl(imageUrl)) {
+            img.src = imageUrl;
+          } else {
+            const proxyUrl = `/api/ai/image?url=${encodeURIComponent(imageUrl)}`;
+            img.src = proxyUrl;
+          }
           if (item.url) img.dataset.fallbackUrl = item.url;
           img.alt = item.title || (item.type === 'video' ? 'Video thumbnail' : 'Image');
           img.className = resultCardClasses.image;
           img.style.minHeight = '120px';
           img.style.backgroundColor = 'var(--color-gray-100, #f3f4f6)';
           img.loading = 'lazy';
+          img.referrerPolicy = 'no-referrer';
 
-          // On error, replace image with a fallback link or note.
+          // On error, try proxy if we haven't already, otherwise hide.
           img.onerror = () => {
-            const figure = img.closest('figure') || img.parentElement;
-            const fallbackUrl = img.dataset.fallbackUrl || (figure?.dataset.fallbackUrl || '');
-            const fallback = document.createElement('div');
-            if (fallbackUrl) {
-              const imgLabel = img.alt ? `Open image: ${img.alt}` : 'Open image';
-              fallback.appendChild(createLinkRow(fallbackUrl, imgLabel));
+            // If we already tried proxy (checked by src url), or if direct load failed
+            // We could try to switch to proxy if direct failed?
+            // For now, let's keep the removal behavior but maybe log it?
+            // Actually, let's try to fallback to proxy if direct fails!
+            const currentSrc = img.src;
+            if (!currentSrc.includes('/api/ai/image')) {
+              img.src = `/api/ai/image?url=${encodeURIComponent(imageUrl)}`;
+              return;
+            }
+
+            if (container.parentNode) {
+              container.parentNode.removeChild(container);
             } else {
-              fallback.appendChild(createAiTextSpan('Image unavailable'));
+              container.style.display = 'none';
             }
-            if (img.parentNode) {
-              img.parentNode.insertBefore(fallback, img);
-            }
-            img.remove();
           };
 
           container.appendChild(img);
-        }
-        if (item.url) {
-          const imgLabel = item.title ? `Open image: ${item.title}` : 'Open image';
-          container.appendChild(createLinkRow(item.url, imgLabel));
         }
         return container;
       }
@@ -567,10 +572,35 @@ export function DocumentEditor() {
       const resultsContainer = document.createElement('div');
       resultsContainer.className = resultCardClasses.block;
       resultsContainer.dataset.embed = 'search-results';
-      resultsContainer.contentEditable = 'false';
-
+      resultsContainer.contentEditable = 'true'; // Allow text editing inside the results block
       const searchableItems = items.filter((item) => item.type !== 'snippet');
-      const mediaItems = searchableItems.filter((item) => item.type === 'image' || item.type === 'video');
+      // STRICT FILTER: Only allow images that actually LOOK like images (url or thumbnail has extension).
+      // This prevents "Wikipedia pages" from being rendered as broken images.
+      const mediaItems = searchableItems.filter((item) => {
+        // Common filter: Exclude obvious logos or icons
+        const isLogo = (u: string) => /logo|icon|favicon/i.test(u);
+
+        // Videos: Include if thumbnail exists (YouTube auto-generated)
+        if (item.type === 'video') return !!item.thumbnail;
+
+        // Images: Must have valid image URL in thumbnail or url
+        if (item.type === 'image') {
+          return (item.thumbnail && isImageUrl(item.thumbnail)) || (item.url && isImageUrl(item.url));
+        }
+
+        // Articles: Do NOT promote to media (User request: separate strictness)
+        // if (item.type === 'article') {
+        //   if (!item.thumbnail || !isImageUrl(item.thumbnail)) return false;
+        //   return !isLogo(item.thumbnail);
+        // }
+
+        return false;
+      })
+        .sort((a, b) => {
+          // Prioritize Real Images/Videos over Articles
+          const score = (type: string) => (type === 'article' ? 0 : 1);
+          return score(b.type) - score(a.type);
+        });
       const infoItems = searchableItems.filter((item) => item.type === 'article');
 
       const limitedMedia = mediaItems.slice(0, 1); // keep visuals minimal
@@ -581,6 +611,101 @@ export function DocumentEditor() {
         return resultsContainer;
       }
 
+      // Add sources as collapsible section with caret
+      const sourceCount = infoItems.length;
+      if (sourceCount > 0) {
+        // Container for all sources
+        const sourcesContainer = document.createElement('div');
+        sourcesContainer.className = 'mb-2';
+
+        // Clickable header with caret
+        const headerDiv = document.createElement('div');
+        headerDiv.className = 'flex items-center gap-1 mb-1';
+
+        // Larger lined caret icon (SVG chevron)
+        const caret = document.createElement('span');
+        caret.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
+        caret.style.display = 'inline-flex';
+        caret.style.alignItems = 'center';
+        caret.style.transition = 'transform 0.2s';
+        caret.style.color = '#6e6e6e';
+
+        const headerSpan = createAiTextSpan(`Viewed ${sourceCount} source${sourceCount === 1 ? '' : 's'}`);
+        headerDiv.appendChild(caret);
+        headerDiv.appendChild(headerSpan);
+
+        // Sources list container (initially hidden)
+        const listContainer = document.createElement('div');
+        listContainer.style.display = 'none';
+        listContainer.className = 'space-y-0.5';
+
+        // Toggle visibility on caret click
+        let isOpen = false;
+        caret.style.cursor = 'pointer';
+        caret.contentEditable = 'false';
+        caret.onclick = (e) => {
+          e.stopPropagation();
+          isOpen = !isOpen;
+          listContainer.style.display = isOpen ? 'block' : 'none';
+          caret.style.transform = isOpen ? 'rotate(90deg)' : 'rotate(0deg)';
+        };
+
+        // Each source as a simple text line
+        infoItems.forEach((item) => {
+          if (item.url) {
+            // Use title first as it's most descriptive, then source, then domain from URL
+            let label = item.title || item.source;
+            if (!label) {
+              try {
+                const url = new URL(item.url);
+                label = url.hostname.replace('www.', '');
+              } catch {
+                label = 'Source';
+              }
+            }
+
+            const sourceDiv = document.createElement('div');
+            sourceDiv.className = 'mb-0.5';
+
+            // Wrapper span for highlight (instead of <a> to allow better editing)
+            const wrapper = document.createElement('span');
+            wrapper.className = 'inline-flex items-center gap-10 py-0 rounded bg-gray-100 transition-colors';
+            wrapper.style.cursor = 'text';
+
+            // Text span with AI styling - fully editable
+            const textSpan = document.createElement('span');
+            textSpan.textContent = label;
+            textSpan.style.color = '#6e6e6e';
+            textSpan.style.fontFamily = 'Inter, sans-serif';
+            textSpan.style.fontSize = '18px';
+            textSpan.style.fontWeight = '350';
+            textSpan.style.lineHeight = '1.2';
+
+            // External link icon (clickable part)
+            const iconSpan = document.createElement('span');
+            iconSpan.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
+            iconSpan.style.color = '#9ca3af';
+            iconSpan.style.display = 'inline-flex';
+            iconSpan.style.flexShrink = '0';
+            iconSpan.style.cursor = 'pointer';
+            iconSpan.contentEditable = 'false';
+            iconSpan.onclick = (e) => {
+              e.stopPropagation();
+              window.open(item.url, '_blank', 'noopener,noreferrer');
+            };
+
+            wrapper.appendChild(textSpan);
+            wrapper.appendChild(iconSpan);
+            sourceDiv.appendChild(wrapper);
+            listContainer.appendChild(sourceDiv);
+          }
+        });
+
+        sourcesContainer.appendChild(headerDiv);
+        sourcesContainer.appendChild(listContainer);
+        resultsContainer.appendChild(sourcesContainer);
+      }
+
       // Show a single representative media item (if any)
       if (limitedMedia.length > 0) {
         limitedMedia.forEach((item) => {
@@ -588,88 +713,73 @@ export function DocumentEditor() {
         });
       }
 
-      // Build a concise combined summary from article snippets/titles
-      const textForSummary = limitedInfo
-        .map((it) => (it.snippet ? `${it.title}: ${it.snippet}` : it.title))
-        .join('\n\n');
+      // REMOVED: Summary generation was never used and added latency.
+      // The excerpt uses the raw snippet from the article, which is correct.
 
-      let summaryText = '';
-      try {
-        if (textForSummary.trim()) {
-          const gen = await generateWithGemini('summarize', textForSummary, selectedModel);
-          if (gen.ok && gen.text) {
-            summaryText = gen.text.replace(/\s+/g, ' ').trim();
-          }
-        }
-      } catch (e) {
-        // fall back to a simple handcrafted summary
-        summaryText = limitedInfo.length
-          ? limitedInfo.map((i) => i.title).slice(0, 3).join('; ')
-          : '';
-      }
+      // Find the "best" excerpt from ARTICLES only
+      // Prioritize snippets that contain usage of quotes or look like direct speech.
+      const meaningfulSnippets = searchableItems.filter((i) => {
+        if (i.type !== 'article') return false; // STRICT: Only articles
+        if (!i.snippet) return false;
+        const s = i.snippet.trim();
+        const len = s.length;
 
-      if (!summaryText && limitedInfo.length > 0) {
-        // fallback short human-readable summary
-        summaryText = limitedInfo
-          .map((it) => it.title)
-          .slice(0, 3)
-          .join('; ');
-      }
+        // Filter out obvious meta-descriptions/summaries
+        // e.g. "This video...", "This article...", "Web site..."
+        if (/^(this|the) (video|article|page|paper|study|site|website)/i.test(s)) return false;
+        if (/^video exploring/i.test(s)) return false;
 
-      if (summaryText) {
-        const p = document.createElement('div');
-        p.appendChild(createAiTextSpan(summaryText));
-        resultsContainer.appendChild(p);
-      }
-
-      // Add at most one short quoted excerpt (conservative)
-      const excerptItem = limitedInfo.find((i) => {
-        if (!i.snippet || !i.snippet.trim()) return false;
-        const len = i.snippet.trim().length;
-        return len >= 20 && len <= 400;
+        return len >= 40 && len <= 400;
       });
+
+      // Sort by "quality" heuristic: 
+      // 1. Contains quotes (highest priority) -> implies direct excerpt
+      // 2. Length (longer is usually better context)
+      const sortedSnippets = meaningfulSnippets.sort((a, b) => {
+        const aHasQuote = a.snippet!.includes('"') || a.snippet!.includes('“');
+        const bHasQuote = b.snippet!.includes('"') || b.snippet!.includes('“');
+        if (aHasQuote && !bHasQuote) return -1;
+        if (!aHasQuote && bHasQuote) return 1;
+        return b.snippet!.length - a.snippet!.length; // Longest first
+      });
+
+      const excerptItem = sortedSnippets[0];
 
       if (excerptItem) {
         const block = document.createElement('blockquote');
-        block.className = resultCardClasses.quote;
-        block.appendChild(document.createTextNode(excerptItem.snippet || ''));
+        // Use AI text styling with italic for the excerpt
+        block.style.borderLeft = '2px solid #e5e7eb';
+        block.style.paddingLeft = '8px';
+        block.style.margin = '8px 0';
+
+        // Parse markdown links in the excerpt and render them as clickable links
+        // The snippet may contain [text](url) patterns from AI-generated content
+        const excerptText = `"${excerptItem.snippet || ''}"`;
+        const excerptFragment = createAiTextWithLinksFragment(excerptText);
+        // Apply italic styling to all text spans in the fragment
+        excerptFragment.querySelectorAll('span').forEach((span) => {
+          (span as HTMLSpanElement).style.fontStyle = 'italic';
+        });
+        block.appendChild(excerptFragment);
         resultsContainer.appendChild(block);
 
+        // Restore the source link (always useful, especially if excerpt has no links)
         if (excerptItem.url) {
           const excerptLink = createLinkRow(
             excerptItem.url,
-            excerptItem.title ? `Open article: ${excerptItem.title}` : 'Open source'
+            excerptItem.title ? `Open source: ${excerptItem.title}` : 'Open source'
           );
           resultsContainer.appendChild(excerptLink);
         }
       }
 
       // Sources list (compact) — use the same "Open ..." style as other links
+      // REMOVED: Replaced by the "Viewed X sources" header at the top to declutter the output.
+      /*
       if (limitedInfo.length > 0) {
-        const sourcesWrapper = document.createElement('div');
-        sourcesWrapper.className = 'mt-2 text-xs text-gray-600';
-        const label = document.createElement('div');
-        label.className = 'text-[11px] text-gray-500 mb-1';
-        label.textContent = 'Sources';
-        sourcesWrapper.appendChild(label);
-
-        const listDiv = document.createElement('div');
-        listDiv.style.display = 'flex';
-        listDiv.style.flexDirection = 'column';
-        listDiv.style.gap = '4px';
-
-        limitedInfo.forEach((it) => {
-          if (!it.url) return;
-          const linkRow = createLinkRow(
-            it.url,
-            it.title ? `Open article: ${it.title}` : it.url
-          );
-          listDiv.appendChild(linkRow);
-        });
-
-        sourcesWrapper.appendChild(listDiv);
-        resultsContainer.appendChild(sourcesWrapper);
+        // ... (removed to reduce jargon)
       }
+      */
 
       return resultsContainer;
     },
@@ -723,8 +833,16 @@ export function DocumentEditor() {
 
         const insertRange = document.createRange();
         if (insertAfterElement.parentNode) {
-          insertRange.setStartAfter(insertAfterElement);
-          insertRange.collapse(true);
+          // Safety check: Ensure insertAfterElement is actually inside the editor
+          const isInsideEditor = editorRef.current?.contains(insertAfterElement);
+          if (!isInsideEditor) {
+            // If not inside editor, insert at the end of the editor instead
+            insertRange.selectNodeContents(editorRef.current);
+            insertRange.collapse(false);
+          } else {
+            insertRange.setStartAfter(insertAfterElement);
+            insertRange.collapse(true);
+          }
         } else {
           insertRange.selectNodeContents(editorRef.current);
           insertRange.collapse(false);
@@ -807,6 +925,7 @@ export function DocumentEditor() {
     async (insertRange: Range, blocks: SkeletonNotesBlock[], inlineItems?: ResultItem[]): Promise<Node | null> => {
       const fragment = document.createDocumentFragment();
       let lastNode: Node | null = null;
+      let resultsContainer: HTMLElement | null = null;
 
       const createHumanBlankLine = () => {
         const p = document.createElement('p');
@@ -815,6 +934,25 @@ export function DocumentEditor() {
         p.appendChild(userSpan);
         return p;
       };
+
+      // 1. Insert search results (visuals) FIRST
+      try {
+        if (inlineItems && inlineItems.length > 0) {
+          // Build a compact results block (may include media thumbnails, links, excerpt)
+          resultsContainer = await buildSearchResultsBlock(inlineItems);
+          if (resultsContainer) {
+            fragment.appendChild(resultsContainer);
+            lastNode = resultsContainer;
+
+            // Add a gap after the visuals before the text starts
+            const gap = createHumanBlankLine();
+            fragment.appendChild(gap);
+            lastNode = gap;
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to build inline search results for skeleton:', err);
+      }
 
       for (let i = 0; i < blocks.length; i++) {
         const block = blocks[i];
@@ -828,7 +966,7 @@ export function DocumentEditor() {
 
           // Detect if this is a label (short text, typically single word/phrase)
           // Labels don't need a gap below them.
-          const isLabel = block.text.length < 60 && 
+          const isLabel = block.text.length < 60 &&
             !block.text.trim().match(/[.!?]$/);
 
           // Only add a gap if:
@@ -870,21 +1008,6 @@ export function DocumentEditor() {
           lastNode = extraGap;
         }
       }
-      // If inlineItems (search results) were provided, append a rich results block
-      // into the skeleton fragment so media (images/videos) render inline with AI notes.
-      let resultsContainer: HTMLElement | null = null;
-      try {
-        if (inlineItems && inlineItems.length > 0) {
-          // Build a compact results block (may include media thumbnails, links, excerpt)
-          resultsContainer = await buildSearchResultsBlock(inlineItems);
-          if (resultsContainer) {
-            fragment.appendChild(resultsContainer);
-            lastNode = resultsContainer;
-          }
-        }
-      } catch (err) {
-        console.warn('Failed to build inline search results for skeleton:', err);
-      }
 
       insertRange.insertNode(fragment);
 
@@ -917,7 +1040,7 @@ export function DocumentEditor() {
 
     // Always get the full editor text for context
     const fullEditorText = getEditorPlainText();
-    
+
     if (!fullEditorText || fullEditorText === 'Start writing...') {
       setAiError('No text found to review. Please write something first.');
       return;
@@ -936,13 +1059,13 @@ export function DocumentEditor() {
     // Walk up to find a block element (p, div, h1-h6, li, etc.)
     let blockElement: HTMLElement | null = null;
     let current: Node | null = container as Node;
-    
+
     while (current && current !== editorRef.current) {
       if (current.nodeType === Node.ELEMENT_NODE) {
         const el = current as HTMLElement;
-        if (el.tagName === 'P' || el.tagName === 'DIV' || 
-            el.tagName.match(/^H[1-6]$/) || el.tagName === 'LI' ||
-            el.tagName === 'BLOCKQUOTE') {
+        if (el.tagName === 'P' || el.tagName === 'DIV' ||
+          el.tagName.match(/^H[1-6]$/) || el.tagName === 'LI' ||
+          el.tagName === 'BLOCKQUOTE') {
           blockElement = el;
           break;
         }
@@ -964,7 +1087,7 @@ export function DocumentEditor() {
       // Fallback: if no block element, try to find the containing element
       let startNode: Node = range.startContainer;
       let bestContainingElement: HTMLElement | null = null;
-      
+
       // Walk up and keep the highest-level element with meaningful text.
       let current: Node | null = startNode;
       while (current && current !== editorRef.current) {
@@ -977,7 +1100,7 @@ export function DocumentEditor() {
         }
         current = current.parentNode;
       }
-      
+
       if (bestContainingElement) {
         // Get all text from this containing element
         const textRange = document.createRange();
@@ -987,7 +1110,7 @@ export function DocumentEditor() {
       } else {
         // Use the full editor text as fallback
         newTextAtCursor = fullEditorText;
-        
+
         // Find the last element with text to insert after
         const walker = document.createTreeWalker(
           editorRef.current,
@@ -1002,7 +1125,7 @@ export function DocumentEditor() {
             }
           }
         );
-        
+
         let lastElement: Node | null = null;
         let node: Node | null;
         while (node = walker.nextNode()) {
@@ -1018,7 +1141,7 @@ export function DocumentEditor() {
             }
           }
         }
-        
+
         // Use the last element or editor as insert point
         if (lastElement) {
           insertAfterElement = lastElement as HTMLElement;
@@ -1290,7 +1413,7 @@ export function DocumentEditor() {
 
       // Check if editor is focused
       const isEditorFocused = editorRef.current?.contains(document.activeElement);
-      
+
       // Handle printable characters when editor is focused (but not with modifiers)
       if (isEditorFocused && !ctrlKey && !e.altKey && e.key.length === 1 && !e.metaKey) {
         // Only intercept if it's a printable character (including spaces)
@@ -1298,7 +1421,7 @@ export function DocumentEditor() {
         if (isPrintable) {
           e.preventDefault();
           e.stopPropagation();
-          
+
           // Get current selection and insert styled text
           const selection = window.getSelection();
           if (selection && selection.rangeCount > 0 && editorRef.current) {
@@ -1320,31 +1443,31 @@ export function DocumentEditor() {
         e.preventDefault();
         document.execCommand('bold');
       }
-      
+
       // Italic - Ctrl/Cmd + I
       if (ctrlKey && e.key === 'i') {
         e.preventDefault();
         document.execCommand('italic');
       }
-      
+
       // Underline - Ctrl/Cmd + U
       if (ctrlKey && e.key === 'u') {
         e.preventDefault();
         document.execCommand('underline');
       }
-      
+
       // Save - Ctrl/Cmd + S
       if (ctrlKey && e.key === 's') {
         e.preventDefault();
         handleSave();
       }
-      
+
       // Undo - Ctrl/Cmd + Z
       if (ctrlKey && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
         document.execCommand('undo');
       }
-      
+
       // Redo - Ctrl/Cmd + Y or Ctrl/Cmd + Shift + Z
       if ((ctrlKey && e.key === 'y') || (ctrlKey && e.shiftKey && e.key === 'z')) {
         e.preventDefault();
@@ -1412,11 +1535,11 @@ export function DocumentEditor() {
           sel.removeAllRanges();
           sel.addRange(r);
           r.deleteContents();
-          
+
           // Insert AI-generated text with AI styling (gray Inter 18pt)
           const aiSpan = createAiTextSpan(result.text);
           r.insertNode(aiSpan);
-          
+
           r.collapse(false);
           sel.removeAllRanges();
           sel.addRange(r);
@@ -1434,7 +1557,7 @@ export function DocumentEditor() {
     if (editorRef.current) {
       const content = editorRef.current.innerHTML;
       localStorage.setItem('documentContent', content);
-      
+
       // Show save notification
       const notification = document.createElement('div');
       notification.textContent = 'Document saved!';
@@ -1457,10 +1580,10 @@ export function DocumentEditor() {
   const isClickInSelection = (x: number, y: number): boolean => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return false;
-    
+
     const range = selection.getRangeAt(0);
     if (range.collapsed) return false;
-    
+
     const rects = range.getClientRects();
     for (let i = 0; i < rects.length; i++) {
       const rect = rects[i];
@@ -1473,40 +1596,40 @@ export function DocumentEditor() {
 
   const handleMouseDown = (e: React.MouseEvent) => {
     const selection = window.getSelection();
-    
+
     // Handle shift+click/drag for multi-selection
     if (e.shiftKey && selection && !selection.isCollapsed) {
       e.preventDefault();
-      
+
       // Save the current selection as an additional selection
       const currentRange = selection.getRangeAt(0).cloneRange();
       setAdditionalSelections(prev => [...prev, currentRange]);
-      
+
       // Start a new selection
       setIsShiftSelecting(true);
       shiftSelectStart.current = { x: e.clientX, y: e.clientY };
       return;
     }
-    
+
     // Check if clicking inside existing selection (for drag and drop)
     if (selection && !selection.isCollapsed && isClickInSelection(e.clientX, e.clientY) && !e.shiftKey) {
       e.preventDefault();
-      
+
       // Combine all selections (main + additional) for dragging
       const mainRange = selection.getRangeAt(0);
       const allRanges = [mainRange, ...additionalSelections];
-      
+
       // Create a combined fragment
       const combinedFragment = document.createDocumentFragment();
       let combinedText = '';
-      
+
       allRanges.forEach((range, index) => {
         const clonedContents = range.cloneContents();
         const container = range.commonAncestorContainer;
-        const element = container.nodeType === Node.ELEMENT_NODE 
-          ? container as HTMLElement 
+        const element = container.nodeType === Node.ELEMENT_NODE
+          ? container as HTMLElement
           : container.parentElement;
-        
+
         if (element) {
           const computedStyle = window.getComputedStyle(element);
           const wrapper = document.createElement('span');
@@ -1522,13 +1645,13 @@ export function DocumentEditor() {
         } else {
           combinedFragment.appendChild(clonedContents);
         }
-        
+
         combinedText += range.toString();
         if (index < allRanges.length - 1) {
           combinedText += ' ';
         }
       });
-      
+
       savedRange.current = mainRange.cloneRange();
       draggedFragment.current = combinedFragment;
       setDraggedContent(combinedText);
@@ -1544,20 +1667,20 @@ export function DocumentEditor() {
     if (isDragging && dragStartPos.current) {
       // Check if Alt/Option key is pressed for duplication
       setIsDuplicating(e.altKey);
-      
+
       // Check if moved enough to start drag
       const dx = e.clientX - dragStartPos.current.x;
       const dy = e.clientY - dragStartPos.current.y;
       if (Math.sqrt(dx * dx + dy * dy) > 5) {
         document.body.style.cursor = 'grabbing';
-        
+
         // Update dragged element position
         setDragElementPos({ x: e.clientX, y: e.clientY });
-        
+
         // Determine drop target
         if (editorRef.current && containerRef.current) {
           const editorRect = editorRef.current.getBoundingClientRect();
-          
+
           if (e.clientX < editorRect.left) {
             setDragTarget('left-margin');
             setDropCursorPos(null);
@@ -1566,22 +1689,22 @@ export function DocumentEditor() {
             setDropCursorPos(null);
           } else if (e.clientX >= editorRect.left && e.clientX <= editorRect.right) {
             setDragTarget('editor');
-            
+
             // Get all actual line positions from the editor content
             const lines: { top: number; bottom: number; left: number }[] = [];
-            
+
             // Walk through block-level elements and get all line boxes within them
             const blockElements = editorRef.current.querySelectorAll('p, h1, h2, h3, h4, h5, h6, div, li');
-            
+
             blockElements.forEach((element) => {
               const range = document.createRange();
-              
+
               // Select the entire content of the block element
               range.selectNodeContents(element);
-              
+
               // Get all client rects - each rect represents a visual line
               const rects = range.getClientRects();
-              
+
               for (let i = 0; i < rects.length; i++) {
                 const rect = rects[i];
                 if (rect.height > 0 && rect.width > 0) {
@@ -1593,7 +1716,7 @@ export function DocumentEditor() {
                 }
               }
             });
-            
+
             // Also handle any text nodes that aren't in block elements
             const walker = document.createTreeWalker(
               editorRef.current,
@@ -1603,20 +1726,20 @@ export function DocumentEditor() {
                   // Only accept text nodes that are direct children or not in a block element
                   const parent = node.parentElement;
                   if (!parent) return NodeFilter.FILTER_REJECT;
-                  
+
                   const isInBlock = parent.closest('p, h1, h2, h3, h4, h5, h6, div, li');
                   return !isInBlock ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
                 }
               }
             );
-            
+
             let node;
             while (node = walker.nextNode()) {
               if (node.textContent?.trim()) {
                 const range = document.createRange();
                 range.selectNodeContents(node);
                 const rects = range.getClientRects();
-                
+
                 for (let i = 0; i < rects.length; i++) {
                   const rect = rects[i];
                   if (rect.height > 0 && rect.width > 0) {
@@ -1629,13 +1752,13 @@ export function DocumentEditor() {
                 }
               }
             }
-            
+
             // Sort lines by top position
             lines.sort((a, b) => a.top - b.top);
-            
+
             // Find the appropriate line to snap to
             let targetLine: { top: number; bottom: number; left: number } | null = null;
-            
+
             // First, check if we're within any line's vertical bounds
             for (const line of lines) {
               if (e.clientY >= line.top && e.clientY <= line.bottom) {
@@ -1643,13 +1766,13 @@ export function DocumentEditor() {
                 break;
               }
             }
-            
+
             // If not within any line, find which line we're between
             if (!targetLine) {
               for (let i = 0; i < lines.length - 1; i++) {
                 const currentLine = lines[i];
                 const nextLine = lines[i + 1];
-                
+
                 // Check if we're in the gap between these two lines
                 if (e.clientY > currentLine.bottom && e.clientY < nextLine.top) {
                   // Use the midpoint of the gap to decide which line to snap to
@@ -1659,28 +1782,28 @@ export function DocumentEditor() {
                 }
               }
             }
-            
+
             // If we're below all content or no lines found, calculate virtual line positions
             const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
             const editorTop = editorRect.top;
-            
+
             if (!targetLine || (lastLine && e.clientY > lastLine.bottom + 10)) {
               // We're below content - create virtual lines
               const startY = lastLine ? lastLine.bottom : editorTop;
               const avgLineHeight = lastLine ? (lastLine.bottom - lastLine.top) : 28;
-              
+
               // Calculate which virtual line we're on
               const relativeY = e.clientY - startY;
               const virtualLineIndex = Math.round(relativeY / avgLineHeight);
               const snappedY = startY + (virtualLineIndex * avgLineHeight);
-              
-              setDropCursorPos({ 
+
+              setDropCursorPos({
                 x: e.clientX,
-                y: snappedY 
+                y: snappedY
               });
             } else if (targetLine) {
               // Snap to the target line
-              setDropCursorPos({ 
+              setDropCursorPos({
                 x: e.clientX,
                 y: targetLine.top
               });
@@ -1694,26 +1817,26 @@ export function DocumentEditor() {
   const handleMouseUp = (e: React.MouseEvent) => {
     if (isDragging && savedRange.current && draggedFragment.current) {
       e.preventDefault();
-      
+
       if (dragTarget === 'left-margin' || dragTarget === 'right-margin') {
         // Add to margin
         if (containerRef.current) {
           const containerRect = containerRef.current.getBoundingClientRect();
           const id = `margin-text-${Date.now()}-${Math.random()}`;
           const content = draggedContent;
-          
+
           // Create a temporary container to get HTML
           const tempDiv = document.createElement('div');
           tempDiv.appendChild(draggedFragment.current.cloneNode(true));
           const htmlContent = tempDiv.innerHTML;
-          
+
           // Determine the new margin side
           const newSide = dragTarget === 'left-margin' ? 'left' : 'right';
-          
+
           // Calculate position relative to the container
           let marginX = 0;
           let marginY = e.clientY - containerRect.top;
-          
+
           if (newSide === 'left') {
             marginX = e.clientX - containerRect.left;
           } else {
@@ -1722,10 +1845,10 @@ export function DocumentEditor() {
               marginX = e.clientX - editorRect.right - 1;
             }
           }
-          
+
           // Don't delete from editor - just copy to margin
           // savedRange.current.deleteContents();
-          
+
           // Set the margin side and add the text
           setMarginSide(newSide);
           setMarginTexts(prev => [
@@ -1738,7 +1861,7 @@ export function DocumentEditor() {
               y: marginY
             }
           ]);
-          
+
           // Clear selection
           window.getSelection()?.removeAllRanges();
         }
@@ -1749,44 +1872,44 @@ export function DocumentEditor() {
           if (!isDuplicating) {
             // Delete the content and normalize spaces
             const rangeToDelete = savedRange.current;
-            
+
             // Check for spaces before and after the selection
             const beforeRange = document.createRange();
             beforeRange.setStart(rangeToDelete.startContainer, Math.max(0, rangeToDelete.startOffset - 1));
             beforeRange.setEnd(rangeToDelete.startContainer, rangeToDelete.startOffset);
             const charBefore = beforeRange.toString();
-            
+
             const afterRange = document.createRange();
             const endContainer = rangeToDelete.endContainer;
-            const maxOffset = endContainer.nodeType === Node.TEXT_NODE 
-              ? (endContainer.textContent?.length || 0) 
+            const maxOffset = endContainer.nodeType === Node.TEXT_NODE
+              ? (endContainer.textContent?.length || 0)
               : endContainer.childNodes.length;
             afterRange.setStart(rangeToDelete.endContainer, rangeToDelete.endOffset);
             afterRange.setEnd(rangeToDelete.endContainer, Math.min(maxOffset, rangeToDelete.endOffset + 1));
             const charAfter = afterRange.toString();
-            
+
             const hasSpaceBefore = /\s/.test(charBefore);
             const hasSpaceAfter = /\s/.test(charAfter);
-            
+
             // Delete the selection
             rangeToDelete.deleteContents();
-            
+
             // If there were spaces on both sides, normalize to a single space
             if (hasSpaceBefore && hasSpaceAfter) {
               // Delete one of the spaces
               const normalizeRange = document.createRange();
               const container = rangeToDelete.startContainer;
               const offset = rangeToDelete.startOffset;
-              
+
               if (container.nodeType === Node.TEXT_NODE && container.textContent) {
                 // Check if there are multiple spaces and reduce to one
                 const text = container.textContent;
                 const beforeText = text.substring(0, offset);
                 const afterText = text.substring(offset);
-                
+
                 const trimmedBefore = beforeText.replace(/\s+$/, ' ');
                 const trimmedAfter = afterText.replace(/^\s+/, '');
-                
+
                 if (beforeText !== trimmedBefore || afterText !== trimmedAfter) {
                   const newText = trimmedBefore + trimmedAfter;
                   container.textContent = newText;
@@ -1794,7 +1917,7 @@ export function DocumentEditor() {
               }
             }
           }
-          
+
           // Get all actual line positions to determine how many lines below we're dropping
           const lines: { top: number; bottom: number }[] = [];
           const walker = document.createTreeWalker(
@@ -1802,7 +1925,7 @@ export function DocumentEditor() {
             NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
             null
           );
-          
+
           const seenLines = new Set<number>();
           let node;
           while (node = walker.nextNode()) {
@@ -1810,7 +1933,7 @@ export function DocumentEditor() {
               const range = document.createRange();
               range.selectNodeContents(node);
               const rects = range.getClientRects();
-              
+
               for (let i = 0; i < rects.length; i++) {
                 const rect = rects[i];
                 const lineKey = Math.round(rect.top);
@@ -1839,23 +1962,23 @@ export function DocumentEditor() {
               }
             }
           }
-          
+
           lines.sort((a, b) => a.top - b.top);
           const lastLine = lines[lines.length - 1];
-          
+
           // Check if we're dropping below the last line
           const isBelowContent = lastLine && dropCursorPos.y > lastLine.bottom + 10;
-          
+
           if (isBelowContent) {
             // Calculate how many lines below we're dropping
             const avgLineHeight = lastLine.bottom - lastLine.top;
             const distanceBelow = dropCursorPos.y - lastLine.bottom;
             const linesBelow = Math.round(distanceBelow / avgLineHeight);
-            
+
             // Create a range at the end of the editor
             const range = document.createRange();
             const lastChild = editorRef.current.lastChild;
-            
+
             if (lastChild) {
               if (lastChild.nodeType === Node.TEXT_NODE) {
                 range.setStart(lastChild, lastChild.textContent?.length || 0);
@@ -1866,39 +1989,39 @@ export function DocumentEditor() {
               range.setStart(editorRef.current, 0);
             }
             range.collapse(true);
-            
+
             // Insert line breaks to create the gap
             for (let i = 0; i < linesBelow; i++) {
               const br = document.createElement('br');
               range.insertNode(br);
               range.setStartAfter(br);
             }
-            
+
             // Clone the fragment to insert
             const fragmentToInsert = draggedFragment.current.cloneNode(true) as DocumentFragment;
             const wrapper = document.createDocumentFragment();
             const nodesToInsert: Node[] = [];
-            
+
             while (fragmentToInsert.firstChild) {
               nodesToInsert.push(fragmentToInsert.firstChild);
               fragmentToInsert.removeChild(fragmentToInsert.firstChild);
             }
-            
+
             nodesToInsert.forEach(node => {
               wrapper.appendChild(node);
             });
-            
+
             // Insert at the end
             range.insertNode(wrapper);
           } else {
             // Normal drop within existing content
             let range = document.caretRangeFromPoint(e.clientX, e.clientY);
-            
+
             if (range && editorRef.current && draggedFragment.current) {
               // Check if we need to add spaces around the dropped content
               const container = range.startContainer;
               const offset = range.startOffset;
-              
+
               // Check the character before the drop position
               let charBefore = '';
               if (container.nodeType === Node.TEXT_NODE && offset > 0) {
@@ -1909,7 +2032,7 @@ export function DocumentEditor() {
                   charBefore = prevNode.textContent?.charAt(prevNode.textContent.length - 1) || '';
                 }
               }
-              
+
               // Check the character after the drop position
               let charAfter = '';
               if (container.nodeType === Node.TEXT_NODE && container.textContent) {
@@ -1920,50 +2043,50 @@ export function DocumentEditor() {
                   charAfter = nextNode.textContent?.charAt(0) || '';
                 }
               }
-              
+
               const needsSpaceBefore = charBefore && !/\s/.test(charBefore);
               const needsSpaceAfter = charAfter && !/\s/.test(charAfter);
-              
+
               // Check if the dragged content has spaces at its edges
               const draggedText = draggedContent.trim();
               const hasLeadingSpace = draggedContent.startsWith(' ') || draggedContent.startsWith('\n');
               const hasTrailingSpace = draggedContent.endsWith(' ') || draggedContent.endsWith('\n');
-              
+
               // Clone the fragment to insert
               const fragmentToInsert = draggedFragment.current.cloneNode(true) as DocumentFragment;
               const wrapper = document.createDocumentFragment();
-              
+
               // Add leading space if needed
               if (needsSpaceBefore && !hasLeadingSpace) {
                 wrapper.appendChild(document.createTextNode(' '));
               }
-              
+
               // Add the dragged content
               const nodesToInsert: Node[] = [];
               while (fragmentToInsert.firstChild) {
                 nodesToInsert.push(fragmentToInsert.firstChild);
                 fragmentToInsert.removeChild(fragmentToInsert.firstChild);
               }
-              
+
               nodesToInsert.forEach(node => {
                 wrapper.appendChild(node);
               });
-              
+
               // Add trailing space if needed
               if (needsSpaceAfter && !hasTrailingSpace) {
                 wrapper.appendChild(document.createTextNode(' '));
               }
-              
+
               // Insert at the drop position
               range.insertNode(wrapper);
             }
           }
-          
+
           // Clear selection
           window.getSelection()?.removeAllRanges();
         }
       }
-      
+
       // Reset state
       document.body.style.cursor = '';
       setIsDragging(false);
@@ -1991,9 +2114,9 @@ export function DocumentEditor() {
   const insertStyledText = (text: string) => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || !editorRef.current) return;
-    
+
     const range = selection.getRangeAt(0);
-    
+
     // Clear placeholder if it exists and user is typing
     if (editorRef.current) {
       const firstChild = editorRef.current.firstElementChild;
@@ -2003,7 +2126,7 @@ export function DocumentEditor() {
         const isGray = computedStyle.color === 'rgb(110, 110, 110)' || computedStyle.color === '#6e6e6e';
         const isInter = computedStyle.fontFamily.includes('Inter');
         const is18px = computedStyle.fontSize === '18px';
-        
+
         if (textContent === 'Start writing...' && isGray && isInter && is18px) {
           editorRef.current.innerHTML = '';
           // Create a new range at the start of the editor
@@ -2018,20 +2141,20 @@ export function DocumentEditor() {
         }
       }
     }
-    
+
     // Delete any selected text first
     if (!range.collapsed) {
       range.deleteContents();
     }
-    
+
     // Check if we're at the end of a styled span and can append to it
     let targetSpan: HTMLElement | null = null;
     let canAppend = false;
-    
+
     if (range.startContainer.nodeType === Node.TEXT_NODE) {
       const textNode = range.startContainer as Text;
       const parent = textNode.parentElement;
-      
+
       if (parent && parent.tagName === 'SPAN' && isHumanTextSpan(parent)) {
         // Check if we're at the end of the text node
         const offset = range.startOffset;
@@ -2042,7 +2165,7 @@ export function DocumentEditor() {
         }
       }
     }
-    
+
     // If we can append to existing styled span, do that
     if (targetSpan && canAppend) {
       const lastChild = targetSpan.lastChild;
@@ -2051,7 +2174,7 @@ export function DocumentEditor() {
       } else {
         targetSpan.appendChild(document.createTextNode(text));
       }
-      
+
       // Move cursor after the inserted text
       const newRange = document.createRange();
       newRange.selectNodeContents(targetSpan);
@@ -2064,12 +2187,12 @@ export function DocumentEditor() {
         ? (range.startContainer as Text).parentElement
         : range.startContainer as HTMLElement;
       let lineHeight = '1'; // Use 1 to minimize line height impact
-      
+
       if (parentElement) {
         const computedStyle = window.getComputedStyle(parentElement);
         const parentLineHeight = computedStyle.lineHeight;
         const parentFontSize = parseFloat(computedStyle.fontSize);
-        
+
         // Calculate line-height that maintains the same total line height
         if (parentLineHeight && parentFontSize && !isNaN(parentFontSize)) {
           const lineHeightPx = parseFloat(parentLineHeight);
@@ -2096,13 +2219,13 @@ export function DocumentEditor() {
           }
         }
       }
-      
+
       // Create a new span with human text styling (black Garamond 20pt)
       const span = createHumanTextSpan(text, lineHeight);
-      
+
       // Insert the styled span
       range.insertNode(span);
-      
+
       // Move cursor after the inserted text
       range.setStartAfter(span);
       range.collapse(true);
@@ -2137,16 +2260,16 @@ export function DocumentEditor() {
 
   const handleBeforeInput = (e: React.FormEvent<HTMLDivElement>) => {
     const inputEvent = e.nativeEvent as InputEvent;
-    
+
     // Only handle text insertion events
     if (inputEvent.inputType === 'insertText' || inputEvent.inputType === 'insertCompositionText') {
       const textToInsert = inputEvent.data || '';
-      
+
       if (!textToInsert) return;
-      
+
       // Prevent default insertion
       e.preventDefault();
-      
+
       // Insert with our styled handler
       insertStyledText(textToInsert);
     }
@@ -2155,12 +2278,12 @@ export function DocumentEditor() {
 
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
     e.preventDefault();
-    
+
     const selection = window.getSelection();
     if (!selection || !editorRef.current) return;
 
     const pastedText = e.clipboardData.getData('text/plain');
-    
+
     if (!pastedText) return;
 
     // Append pasted content after the last *meaningful* node (ignore trailing empty lines/blocks)
@@ -2239,18 +2362,18 @@ export function DocumentEditor() {
       hydrateLinkPreviewCard(card, trimmed);
       return;
     }
-    
+
     // Get the computed line-height from the parent
     const parentElement = range.startContainer.nodeType === Node.TEXT_NODE
       ? (range.startContainer as Text).parentElement
       : range.startContainer as HTMLElement;
     let lineHeight = '1'; // Use 1 to minimize line height impact
-    
+
     if (parentElement) {
       const computedStyle = window.getComputedStyle(parentElement);
       const parentLineHeight = computedStyle.lineHeight;
       const parentFontSize = parseFloat(computedStyle.fontSize);
-      
+
       // Calculate line-height that maintains the same total line height
       if (parentLineHeight && parentFontSize && !isNaN(parentFontSize)) {
         const lineHeightPx = parseFloat(parentLineHeight);
@@ -2274,10 +2397,10 @@ export function DocumentEditor() {
         }
       }
     }
-    
+
     // Create a span with human text styling (black Garamond 20pt) for pasted text
     const span = createHumanTextSpan('', lineHeight);
-    
+
     // Preserve line breaks by converting them to <br> tags
     const lines = pastedText.split('\n');
     lines.forEach((line, index) => {
@@ -2288,10 +2411,10 @@ export function DocumentEditor() {
         span.appendChild(document.createTextNode(line));
       }
     });
-    
+
     // Insert the styled span
     range.insertNode(span);
-    
+
     // Move cursor to the end after the pasted content
     const newRange = document.createRange();
     newRange.setStartAfter(span);
@@ -2315,13 +2438,13 @@ export function DocumentEditor() {
   const handleMarginTextExpand = (id: string) => {
     const marginText = marginTexts.find(m => m.id === id);
     if (!marginText || !editorRef.current) return;
-    
+
     // Set the editor content to the margin text's HTML content
     editorRef.current.innerHTML = marginText.htmlContent;
-    
+
     // Remove the margin text from the margin
     setMarginTexts(prev => prev.filter(m => m.id !== id));
-    
+
     // Focus the editor
     editorRef.current.focus();
   };
@@ -2419,58 +2542,21 @@ export function DocumentEditor() {
 
           <div className="w-3" />
 
-          {/* AI actions � Gemini (low-cost model) */}
-          <Popover>
-            <PopoverTrigger asChild>
-              <button
-                type="button"
-                className="p-1.5 hover:text-gray-700 transition-colors disabled:opacity-50"
-                title="AI: Summarize, improve, or expand selection"
-                disabled={aiLoading}
-                aria-label="AI actions"
-              >
-                {aiLoading ? (
-                  <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
-                ) : (
-                  <Sparkles className="w-4 h-4" aria-hidden />
-                )}
-              </button>
-            </PopoverTrigger>
-            <PopoverContent align="start" className="w-56 p-2">
-              <p className="text-xs text-gray-500 mb-2 px-1">Select text, then:</p>
-              <div className="flex flex-col gap-0.5">
-                <button
-                  type="button"
-                  className="text-left text-sm px-2 py-1.5 rounded hover:bg-gray-100"
-                  onClick={() => handleAiAction('summarize')}
-                  disabled={aiLoading}
-                >
-                  Summarize
-                </button>
-                <button
-                  type="button"
-                  className="text-left text-sm px-2 py-1.5 rounded hover:bg-gray-100"
-                  onClick={() => handleAiAction('improve')}
-                  disabled={aiLoading}
-                >
-                  Improve writing
-                </button>
-                <button
-                  type="button"
-                  className="text-left text-sm px-2 py-1.5 rounded hover:bg-gray-100"
-                  onClick={() => handleAiAction('expand')}
-                  disabled={aiLoading}
-                >
-                  Expand
-                </button>
-              </div>
-              {aiError && (
-                <p className="text-xs text-red-600 mt-2 px-1 break-words" role="alert">
-                  {aiError}
-                </p>
-              )}
-            </PopoverContent>
-          </Popover>
+          {/* AI Review - same as Cmd+Enter */}
+          <button
+            type="button"
+            className="p-1.5 hover:text-gray-700 transition-colors disabled:opacity-50"
+            title="AI Review (Cmd+Enter)"
+            disabled={aiLoading}
+            aria-label="AI Review"
+            onClick={handleAiReview}
+          >
+            {aiLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
+            ) : (
+              <Sparkles className="w-4 h-4" aria-hidden />
+            )}
+          </button>
 
           <div className="ml-2 flex items-center gap-2">
             <label htmlFor="model-select" className="text-xs text-gray-500">
@@ -2541,9 +2627,8 @@ export function DocumentEditor() {
       {/* Dragged Text Element */}
       {dragElementPos && draggedContent && (
         <div
-          className={`fixed pointer-events-none z-50 text-white px-2 py-1 rounded text-sm max-w-xs truncate shadow-lg ${
-            isDuplicating ? 'bg-green-500' : 'bg-blue-500'
-          }`}
+          className={`fixed pointer-events-none z-50 text-white px-2 py-1 rounded text-sm max-w-xs truncate shadow-lg ${isDuplicating ? 'bg-green-500' : 'bg-blue-500'
+            }`}
           style={{
             left: `${dragElementPos.x + 10}px`,
             top: `${dragElementPos.y + 10}px`,
@@ -2581,8 +2666,8 @@ export function DocumentEditor() {
         {/* Left Margin (only when marginSide === 'left') */}
         {marginSide === 'left' && (
           <>
-            <div 
-              className="relative flex-shrink-0 overflow-hidden" 
+            <div
+              className="relative flex-shrink-0 overflow-hidden"
               style={{ width: `${marginWidth}px`, height: 'calc(100vh - 48px)' }}
             >
               {/* Switch Handle */}
@@ -2613,7 +2698,7 @@ export function DocumentEditor() {
 
             {/* Left Divider */}
             {hasMarginContent && (
-              <div 
+              <div
                 className="relative flex-shrink-0 group"
                 onMouseDown={handleDividerMouseDown}
               >
@@ -2651,7 +2736,7 @@ export function DocumentEditor() {
           <>
             {/* Right Divider */}
             {hasMarginContent && (
-              <div 
+              <div
                 className="relative flex-shrink-0 group"
                 onMouseDown={handleDividerMouseDown}
               >
@@ -2662,8 +2747,8 @@ export function DocumentEditor() {
               </div>
             )}
 
-            <div 
-              className="relative flex-shrink-0 overflow-hidden" 
+            <div
+              className="relative flex-shrink-0 overflow-hidden"
               style={{ width: `${marginWidth}px`, height: 'calc(100vh - 48px)' }}
             >
               {/* Switch Handle */}

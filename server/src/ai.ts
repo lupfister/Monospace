@@ -326,7 +326,7 @@ const runSearchAgentForQuery = async (
   const agent = new Agent({
     name: 'WebSearchAgent',
     instructions:
-      'You are a search assistant. Use the hosted web_search tool to gather relevant, specific, and interesting results for the provided query. Avoid generic or low-signal sources (stock image sites, content farms, or thin aggregator pages). Prefer high-quality sources that add depth and are likely to prompt a user reaction. Include a short excerpt in "snippet" whenever possible. For image-type queries: return only pages whose main image is contextually relevant to the topic—e.g. screenshots, icons, software UI, diagrams, or real photos of the subject. Do NOT return document-converter or file-conversion tool landing pages, logo/lettermark pages, or marketing pages; skip any result where the primary image would be a logo, lettermark, or tool branding. Prefer Wikipedia, official product pages, or educational articles that show the actual thing (file icon, screenshot, diagram). Return the page URL in "url"; the server will extract a real image from the page. If a search result clearly shows a direct image URL (e.g. ending in .jpg, .png), put it in "thumbnail" and "url". After you gather results, respond with JSON that matches { "results": [ { "title": string, "url": string, "snippet"?: string, "thumbnail"?: string } ] }. Limit to 5 entries, and do not include any surrounding explanation.',
+      'You are a search assistant. Use the hosted web_search tool to gather relevant, specific, and interesting results for the provided query. Avoid generic or low-signal sources (stock image sites, content farms, or thin aggregator pages). Prefer high-quality sources that add depth and are likely to prompt a user reaction. Include a short excerpt in "snippet" whenever possible. For image-type queries: return only pages whose main image is contextually relevant to the topic—e.g. screenshots, icons, software UI, diagrams, or real photos of the subject. The goal is to find a page that contains a high-quality image of the subject. Do NOT return document-converter or file-conversion tool landing pages, logo/lettermark pages, or marketing pages; skip any result where the primary image would be a logo, lettermark, or tool branding. Prefer Wikipedia, official product pages, or educational articles that show the actual thing (file icon, screenshot, diagram). Return the page URL in "url"; the server will extract a real image from the page. If a search result clearly shows a direct image URL (e.g. ending in .jpg, .png), put it in "thumbnail" and "url". After you gather results, respond with JSON that matches { "results": [ { "title": string, "url": string, "snippet"?: string, "thumbnail"?: string } ] }. Limit to 5 entries, and do not include any surrounding explanation.',
     tools: [webSearchTool()],
     model: modelToUse,
   });
@@ -343,8 +343,7 @@ Return ONLY the required JSON structure (no extra text). Output must be valid JS
     parsed = extractJsonFromOutput(output);
   } catch (error) {
     throw new Error(
-      `Search agent returned invalid JSON for "${query.query}": ${
-        error instanceof Error ? error.message : String(error)
+      `Search agent returned invalid JSON for "${query.query}": ${error instanceof Error ? error.message : String(error)
       }`
     );
   }

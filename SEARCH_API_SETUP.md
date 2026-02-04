@@ -1,80 +1,26 @@
 # Web Search API Setup
 
-The web search feature is now integrated into the document editor with **FREE API options** built-in!
+The web search feature is now integrated into the document editor using **OpenAI Agents**.
 
-## 🆓 Free API Options (Recommended)
+## Setup
 
-### Option 1: Gemini API ⭐ (Best for Web & YouTube)
-1. Create an API key at https://aistudio.google.com/apikey
-2. Add to your `.env` file:
-```
-VITE_GEMINI_API_KEY=your_api_key_here
-```
+1. Ensure your server has a valid `OPENAI_API_KEY` in the `.env` file.
+2. The search agent uses the `web_search` tool from the `@openai/agents-openai` SDK.
 
-**Pros:**
-- Single API for AI + web grounding
-- Great for AI applications
-- Works well for articles + YouTube links
+## Capabilities
 
-### Option 2: Pexels API ⭐ (Best for Images & Videos)
-**Completely FREE - No limits for standard usage**
-
-1. Sign up at [Pexels API](https://www.pexels.com/api/)
-2. Get your API key (completely free)
-3. Add to your `.env` file:
-```
-VITE_PEXELS_API_KEY=your_api_key_here
-```
-
-**Pros:**
-- 100% free for images and videos
-- High-quality stock photos and videos
-- No credit card required
-- Perfect for visual content
-
-## 🎯 Recommended Setup
-
-For the best free experience, use **both**:
-1. **Gemini API** for web articles and YouTube videos
-2. **Pexels API** for high-quality images and videos
-
-The implementation automatically uses the best available API for each content type!
-
-## 💰 Paid Options (If you need more)
-
-### Google Custom Search API
-- Free tier: 100 queries/day
-- Paid: $5 per 1,000 queries
-
-### SerpAPI
-- Paid plans starting at $50/month
-- Comprehensive search coverage
-
-### Bing Search API
-- Free tier: Limited
-- Paid: Pay-as-you-go pricing
+- **YouTube Videos**: Finds relevant videos.
+- **Images**: Finds contextually relevant images (screenshots, diagrams, icons, etc.).
+- **Articles**: Finds and summarizes relevant web articles.
 
 ## Usage
 
-Once configured:
-
-1. Select text in the document editor
-2. Click the search icon (🔍) in the toolbar
-3. The AI will suggest search queries based on your text
-4. Search results will appear in a dialog showing:
-   - YouTube videos
-   - Articles
-   - Images
-
-## Features
-
-- **Smart Query Generation**: Uses Gemini AI to suggest optimal search queries
-- **Categorized Results**: Automatically categorizes results into videos, articles, and images
-- **Rich Display**: Shows thumbnails, snippets, and links for easy browsing
-- **Click to Open**: All results are clickable and open in new tabs
+1. Select text in the document editor.
+2. Click the search icon (🔍) in the toolbar.
+3. The AI will suggest search queries based on your text.
+4. Search results will appear in a dialog.
 
 ## Notes
 
-- The search feature requires an active internet connection
-- API usage may incur costs depending on your provider
-- Rate limits may apply based on your API plan
+- The search feature requires an active internet connection.
+- Costs are incurred via your OpenAI API usage.

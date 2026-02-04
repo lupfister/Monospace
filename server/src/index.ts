@@ -26,7 +26,7 @@ interface AiRequestBody {
   model?: string | null;
 }
 
-app.post('/api/ai/action', async (req: Request<unknown, unknown, AiRequestBody>, res: Response) => {
+app.post('/api/ai/action', async (req: any, res: any) => {
   const { action, text, model } = req.body || {};
 
   if (!action || typeof action !== 'string') {
@@ -71,7 +71,7 @@ app.post('/api/ai/action', async (req: Request<unknown, unknown, AiRequestBody>,
   }
 });
 
-app.post('/api/ai/search', async (req: Request<unknown, unknown, { queries: { type: string; query: string }[]; model?: string | null }>, res: Response) => {
+app.post('/api/ai/search', async (req: any, res: any) => {
   const parsed = parseAgentSearchRequest(req.body);
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: 'Invalid search queries.' });
@@ -152,7 +152,7 @@ const resolveToImageUrl = async (
   return null;
 };
 
-app.get('/api/ai/image', async (req: Request, res: Response) => {
+app.get('/api/ai/image', async (req: any, res: any) => {
   const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
   if (!rawUrl) {
     return res.status(400).json({ ok: false, error: 'Missing url parameter.' });
@@ -238,7 +238,7 @@ app.get('/api/ai/image', async (req: Request, res: Response) => {
   }
 });
 
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: Error, _req: any, res: any, _next: any) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ ok: false, error: 'Internal server error.' });
 });

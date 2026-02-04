@@ -1,6 +1,5 @@
-import { Agent, run } from '@openai/agents';
+import { Agent, run, webSearchTool } from '@openai/agents';
 import { z } from 'zod';
-import { webSearchTool } from '@openai/agents-openai';
 
 export type GeminiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search';
 
@@ -20,7 +19,7 @@ const SEARCH_PLAN_SCHEMA = z.object({
   queries: z
     .array(
       z.object({
-        type: z.enum(['video', 'image', 'web']),
+        type: (z.enum as any)(['video', 'image', 'web']),
         query: z.string().min(1),
         reason: z.string().optional(),
       }),
@@ -65,11 +64,10 @@ const runBasicAgent = async (
   const agent = new Agent({
     name: 'DocumentAssistant',
     instructions,
-  });
-
-  const result = await run(agent, userPrompt, {
     model,
   });
+
+  const result = await run(agent, userPrompt);
 
   const output = (result as any).finalOutput;
   if (typeof output === 'string') {
@@ -185,9 +183,10 @@ ${t}`;
     name: 'SearchPlanner',
     instructions:
       'You decide whether web search is useful and propose up to 3 concrete search queries. You must return strict JSON per the provided Plan type and nothing else.',
+    model: modelToUse,
   });
 
-  const result = await run(agent, prompt, { model: modelToUse });
+  const result = await run(agent, prompt);
   const output = (result as any).finalOutput;
   const raw = typeof output === 'string' ? output.trim() : String(output ?? '').trim();
 
@@ -231,7 +230,7 @@ const AGENT_SEARCH_RESPONSE_SCHEMA = z.object({
 });
 
 const AGENT_SEARCH_QUERY_SCHEMA = z.object({
-  type: z.enum(['video', 'article', 'image']),
+  type: (z.enum as any)(['video', 'article', 'image']),
   query: z.string().min(1),
 });
 

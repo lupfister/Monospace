@@ -49,11 +49,11 @@
         "vaul": "^1.1.2",
         "zod": "*",
         "dotenv": "*",
-        "cors": "*"
+        "cors": "*",
+        "@openai/agents-openai": "*"
     },
     "devDependencies": {
         "@types/node": "^20.10.0",
-        "@types/express": "^5.0.0",
         "@types/cors": "^2.8.17",
         "@vitejs/plugin-react-swc": "^3.10.2",
         "concurrently": "*",

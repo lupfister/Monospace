@@ -30,6 +30,7 @@ export const createLoadingShimmer = (phase: LoadingPhase = 'planning'): HTMLDivE
     const container = document.createElement('div');
     container.className = 'ai-loading-shimmer';
     container.dataset.loadingPhase = phase;
+    container.dataset.aiText = 'true';
     container.contentEditable = 'false';
     container.style.cssText = `
     display: block;
@@ -96,6 +97,7 @@ export const createErrorBlock = (error: AiError): HTMLDivElement => {
     const container = document.createElement('div');
     container.className = 'ai-error-block';
     container.contentEditable = 'false';
+    container.dataset.aiText = 'true';
     container.style.cssText = `
     padding: 12px 16px;
     background: #fef2f2;
@@ -135,6 +137,7 @@ export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
             // Wrapper is still useful for relative positioning of play icon
             const mediaWrapper = document.createElement('span'); // Span to be inline-ish but effective
             mediaWrapper.contentEditable = 'false'; // IMPORTANT: Unit as a whole
+            mediaWrapper.dataset.aiText = 'true';
             mediaWrapper.style.display = 'inline-block';
             mediaWrapper.style.position = 'relative';
             mediaWrapper.style.overflow = 'hidden';
@@ -205,6 +208,7 @@ export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
         // 2. Link/Title Line
         if (item.title || item.url) {
             const linkPara = document.createElement('p');
+            linkPara.dataset.aiText = 'true';
             linkPara.style.lineHeight = '1.5';
 
             // Use title or domain as label
@@ -238,6 +242,7 @@ export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
 
         container.className = resultCardClasses.item; // Keep existing style for articles
         container.dataset.resultType = item.type;
+        container.dataset.aiText = 'true';
         if (item.url) container.dataset.url = item.url;
 
         container.appendChild(createAiTextBlock(item.snippet || item.title));
@@ -257,6 +262,7 @@ export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
 
 const createSpacer = () => {
     const el = document.createElement('p');
+    el.dataset.aiText = 'true';
     el.style.lineHeight = '1.5';
     el.style.minHeight = '1.5em';
     el.appendChild(document.createElement('br'));
@@ -375,6 +381,7 @@ export const buildSearchResultsBlock = async (
     if (sourceCount > 0) {
         // Container for all sources
         const sourcesContainer = document.createElement('div');
+        sourcesContainer.dataset.aiText = 'true';
         // sourcesContainer.className = 'mb-2'; // Removed CSS gap
 
         // Header
@@ -491,6 +498,7 @@ export const buildSearchResultsBlock = async (
         const excerptText = `"${excerptItem.snippet || ''}"`;
 
         const excerptP = document.createElement('p');
+        excerptP.dataset.aiText = 'true';
         excerptP.style.lineHeight = '1.5';
 
         const excerptSpan = createAiTextSpan(excerptText);
@@ -502,6 +510,7 @@ export const buildSearchResultsBlock = async (
         // Single source link below the excerpt (the ONLY link)
         if (excerptItem.url) {
             const linkWrapper = document.createElement('p');
+            linkWrapper.dataset.aiText = 'true';
             linkWrapper.style.lineHeight = '1.5';
             linkWrapper.appendChild(createStyledSourceLink(
                 excerptItem.url,
@@ -519,6 +528,10 @@ export const buildSearchResultsBlock = async (
         notes.blocks.forEach((block) => {
             if (block.kind === 'ai') {
                 const aiP = document.createElement('p');
+                aiP.dataset.aiText = 'true';
+                if (block.text.trim().match(/\?$/)) {
+                    aiP.dataset.aiQuestion = 'true';
+                }
                 aiP.style.lineHeight = '1.5';
 
                 // Strict Sanitization
@@ -536,6 +549,8 @@ export const buildSearchResultsBlock = async (
 
                 // Question Prompt
                 const promptP = document.createElement('p');
+                promptP.dataset.aiText = 'true';
+                promptP.dataset.aiQuestion = 'true';
                 promptP.style.lineHeight = '1.5';
                 promptP.appendChild(createAiTextSpan(block.prompt));
                 fragment.appendChild(promptP);

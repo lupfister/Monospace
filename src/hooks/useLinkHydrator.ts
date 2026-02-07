@@ -83,6 +83,7 @@ export function useLinkHydrator(editorRef: React.RefObject<HTMLDivElement>) {
                     const figure = img.closest('figure');
                     const fallbackUrl = img.dataset.fallbackUrl || figure?.dataset.fallbackUrl || '';
                     const fallback = document.createElement('div');
+                    fallback.dataset.aiText = 'true';
                     if (fallbackUrl) {
                         const imgLabel = img.alt ? `Open image: ${img.alt}` : 'Open image';
                         fallback.appendChild(createStyledSourceLink(fallbackUrl, imgLabel));

@@ -61,6 +61,11 @@ export interface FullReviewResult {
   narrative: SkeletonNotes;
 }
 
+export interface ContextBlock {
+  source: 'human' | 'ai';
+  text: string;
+}
+
 type InternalAiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search';
 
 const mapActionToInternal = (action: AiAction): InternalAiAction => {
@@ -73,6 +78,7 @@ const postAiAction = async <TResponse>(body: {
   text: string;
   model?: string | null;
   searchContext?: unknown;
+  context?: ContextBlock[];
 }): Promise<TResponse> => {
   try {
     const res = await fetch('/api/ai/action', {
@@ -269,7 +275,8 @@ export const searchWithAgent = async (
 export const fullReview = async (
   text: string,
   model?: string | null,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  context?: ContextBlock[]
 ): Promise<{ ok: true; data: FullReviewResult } | { ok: false; error: AiError }> => {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -283,7 +290,7 @@ export const fullReview = async (
     const res = await fetch('/api/ai/review', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: trimmed, model: model ?? undefined }),
+      body: JSON.stringify({ text: trimmed, model: model ?? undefined, context }),
       signal,
     });
 

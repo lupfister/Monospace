@@ -112,10 +112,37 @@ export const handleExpand = async (text: string, model?: string | null): Promise
   );
 };
 
-export const handleReviewSkeletonNotes = async (text: string, model?: string | null, searchContext?: string): Promise<string> => {
-  const t = text.slice(0, 4000);
+export interface ContextBlock {
+  source: 'human' | 'ai';
+  text: string;
+}
 
-  const prompt = `You are writing "skeleton notes" for a document editor. The app will display content in this order: (1) images and video embeds (inserted by the app from search), (2) your information section, (3) your questions. You must output ONLY the information section and the questions. Do NOT output "Video link:", "Image link:", or any raw URLs. Do NOT describe or reference specific videos or images—the app inserts those above your response.
+const formatContext = (context: ContextBlock[]): string => {
+  return context.map(block => `[${block.source.toUpperCase()}]: ${block.text}`).join('\n\n');
+};
+
+const getLastHumanText = (context: ContextBlock[]): string => {
+  for (let i = context.length - 1; i >= 0; i--) {
+    if (context[i].source === 'human') return context[i].text;
+  }
+  return '';
+};
+
+export const handleReviewSkeletonNotes = async (
+  text: string,
+  model?: string | null,
+  searchContext?: string,
+  context: ContextBlock[] = []
+): Promise<string> => {
+  // If we have structure context, use it. Otherwise fall back to raw text.
+  // We prioritize the last human message for the "User's text" part, but provide the full history.
+  const conversationHistory = context.length > 0 ? formatContext(context) : `[HUMAN]: ${text}`;
+  const latestUserText = context.length > 0 ? getLastHumanText(context) : text;
+
+  const prompt = `You are writing "skeleton notes" for a document editor. The app will display content in this order: (1) images and video embeds (inserted by the app from search), (2) your information section, (3) your questions.
+  
+You are receiving a CONVERSATION HISTORY between a Human and AI.
+Your goal is to RESPOND to the LATEST Human input, while respecting the context of the previous turn.
 
 Output MUST be valid JSON only (no markdown, no code fences, no commentary) matching this TypeScript type:
 type Block =
@@ -153,8 +180,11 @@ ${searchContext ? `Context from web search (incorporate relevant findings into t
 ${searchContext}` : ''
     }
 
-User's text:
-${t} `;
+CONVERSATION HISTORY:
+${conversationHistory}
+
+LATEST USER INPUT (Focus your response here):
+${latestUserText} `;
 
   return runBasicAgent(
     'You are a note-taking assistant that outputs ONLY JSON matching the specified TypeScript type, optionally followed by a single [SEARCH_*] tag.',
@@ -163,12 +193,17 @@ ${t} `;
   );
 };
 
-export const handlePlanSearch = async (text: string, model?: string | null): Promise<SearchPlan> => {
+export const handlePlanSearch = async (
+  text: string,
+  model?: string | null,
+  context: ContextBlock[] = []
+): Promise<SearchPlan> => {
   ensureApiKey();
   // Use same model as search so plan quality matches execution (nano doesn't support web search; plan with mini).
   const modelToUse = getModelForSearch(model);
 
-  const t = text.slice(0, 4000);
+  const conversationHistory = context.length > 0 ? formatContext(context) : `[HUMAN]: ${text}`;
+  const latestUserText = context.length > 0 ? getLastHumanText(context) : text;
 
   const prompt = `You are an Expert Search Strategist. Your goal is to maximize "serendipity"—finding content that connects the user's text to unexpected fields, history, or future possibilities. Avoid the obvious.
 
@@ -186,7 +221,10 @@ GOALS BY TYPE:
 • WEB (Article): Find primary sources, surprising research findings, or in-depth analysis from reputable institutions. Look for content that provides substantive context and "rabbit holes" to explore.
 
 Text to analyze:
-${t}`;
+${conversationHistory}
+
+Focus on the LATEST human input:
+${latestUserText}`;
 
   const agent = new Agent({
     name: 'SearchPlanner',
@@ -201,7 +239,7 @@ ${t}`;
   console.log('[SearchPlanner] Raw output:', raw);
 
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = extractJsonFromOutput(raw);
     const validated = SEARCH_PLAN_SCHEMA.safeParse(parsed);
     if (!validated.success) {
       return { shouldSearch: false, queries: [] };
@@ -299,9 +337,10 @@ const extractJsonFromOutput = (output: unknown): unknown => {
   const trimmed = output.trim();
   if (!trimmed) return trimmed;
 
+  // Aggressively strip markdown code fences
   const withoutFence = trimmed
-    .replace(/^```(?: json) ?\s */i, '')
-    .replace(/```$/i, '')
+    .replace(/^```[a-zA-Z]*\n?/i, '') // Remove starting fence (```json, ```, etc) + optional newline
+    .replace(/```$/i, '') // Remove ending fence
     .trim();
 
   const parseWithCleanup = (value: string) => {
@@ -453,10 +492,12 @@ export interface FullReviewResult {
 export const handleFullReview = async (
   text: string,
   model?: string | null,
+  context?: ContextBlock[]
 ): Promise<FullReviewResult> => {
   // 1. Plan search
   console.log('[handleFullReview] Starting plan phase...');
-  const plan = await handlePlanSearch(text, model);
+  const validContext = context || [];
+  const plan = await handlePlanSearch(text, model, validContext);
   console.log('[handleFullReview] Plan:', plan);
 
   // 2. Execute searches in parallel (if needed)
@@ -479,7 +520,7 @@ export const handleFullReview = async (
     : undefined;
 
   console.log('[handleFullReview] Generating narrative...');
-  const narrativeText = await handleReviewSkeletonNotes(text, model, searchContext);
+  const narrativeText = await handleReviewSkeletonNotes(text, model, searchContext, validContext);
   const narrative = parseSkeletonNotes(narrativeText);
   console.log('[handleFullReview] Generated', narrative.blocks.length, 'blocks');
 

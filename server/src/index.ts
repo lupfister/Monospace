@@ -28,8 +28,8 @@ interface AiRequestBody {
 }
 
 app.post('/api/ai/action', async (req: any, res: any) => {
-  const { action, text, model } = req.body || {};
-  console.log(`[API] /action request: ${action}, text len: ${text?.length}, model: ${model}`);
+  const { action, text, model, context } = req.body || {};
+  console.log(`[API] /action request: ${action}, text len: ${text?.length}, model: ${model}, context len: ${context?.length}`);
 
   if (!action || typeof action !== 'string') {
     return res.status(400).json({ ok: false, error: 'Missing or invalid "action" field.' });
@@ -57,12 +57,12 @@ app.post('/api/ai/action', async (req: any, res: any) => {
 
     if (action === 'review') {
       const searchContext = (req.body as any).searchContext;
-      const resultText = await handleReviewSkeletonNotes(text, model, searchContext);
+      const resultText = await handleReviewSkeletonNotes(text, model, searchContext, context);
       return res.json({ ok: true, text: resultText });
     }
 
     if (action === 'plan_search') {
-      const plan = await handlePlanSearch(text, model);
+      const plan = await handlePlanSearch(text, model, context);
       return res.json({ ok: true, plan });
     }
 
@@ -104,8 +104,8 @@ function classifyError(error: unknown): string {
 
 // Unified review endpoint - batches planning, search, and narrative into one call
 app.post('/api/ai/review', async (req: any, res: any) => {
-  const { text, model } = req.body || {};
-  console.log(`[API] /review request: text len: ${text?.length}, model: ${model}`);
+  const { text, model, context } = req.body || {};
+  console.log(`[API] /review request: text len: ${text?.length}, model: ${model}, context len: ${context?.length}`);
 
   if (!text || typeof text !== 'string') {
     return res.status(400).json({
@@ -115,7 +115,7 @@ app.post('/api/ai/review', async (req: any, res: any) => {
   }
 
   try {
-    const result = await handleFullReview(text, model);
+    const result = await handleFullReview(text, model, context);
     return res.json({ ok: true, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

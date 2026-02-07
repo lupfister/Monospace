@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { fullReview, type AiError, type AgentSearchResult } from '../lib/openaiAgentApi';
+import { extractDocumentContext } from '../lib/contextExtractor';
 import {
     buildSearchResultsBlock,
     createLoadingShimmer,
@@ -96,11 +97,13 @@ export function useSearchAgent(
             setPhase('searching');
             updateShimmerPhase(shimmer, 'searching');
 
-            // Make the unified API call
+            // Make the unified API call with context
+            const context = extractDocumentContext(editorRef.current);
             const result = await fullReview(
                 trimmedText,
                 selectedModel,
-                abortControllerRef.current.signal
+                abortControllerRef.current.signal,
+                context
             );
 
             if (!result.ok) {

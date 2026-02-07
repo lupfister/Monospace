@@ -7,9 +7,11 @@ import {
   ListOrdered,
   MoveHorizontal,
   Sparkles,
-  Loader2
+  Loader2,
+  Eye,
+  EyeOff
 } from 'lucide-react';
-import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink } from '../lib/textStyles';
+import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan } from '../lib/textStyles';
 import { isProbablyUrl } from '../lib/linkPreviews';
 
 import { useLinkHydrator } from '../hooks/useLinkHydrator';
@@ -51,6 +53,7 @@ export function DocumentEditor() {
   const lineHeightDragStart = useRef<{ y: number; initialHeight: number } | null>(null);
 
   const [selectedModel, setSelectedModel] = useState('gpt-4o-mini');
+  const [showAiText, setShowAiText] = useState(true);
   const { handleAiReview, cancelReview, isLoading, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(editorRef, selectedModel, hydrateSearchResultImages);
 
   const isBusy = isLoading;
@@ -155,6 +158,18 @@ export function DocumentEditor() {
       requestAnimationFrame(() => {
         hydrateSearchResultImages(editorRef.current);
         normalizeContent();
+
+        // Tag existing AI text
+        if (editorRef.current) {
+          const spans = editorRef.current.querySelectorAll('span');
+          spans.forEach(span => {
+            if (isAiTextSpan(span) || span.querySelector('svg')) { // Simple check for likely AI text or source links
+              if (isAiTextSpan(span) || span.getAttribute('role') === 'link') {
+                span.setAttribute('data-ai-text', 'true');
+              }
+            }
+          });
+        }
       });
     }
   }, [hydrateSearchResultImages, normalizeContent]);
@@ -519,6 +534,8 @@ export function DocumentEditor() {
             const wrapper = document.createDocumentFragment();
             while (fragmentToInsert.firstChild) wrapper.appendChild(fragmentToInsert.firstChild);
             range.insertNode(wrapper);
+
+            preserveAiContext(range.commonAncestorContainer);
           } else {
             let range = document.caretRangeFromPoint(e.clientX, e.clientY);
             if (range && editorRef.current && draggedFragment.current) {
@@ -528,6 +545,8 @@ export function DocumentEditor() {
               // Add spaces logic here if we were thorough
               while (fragmentToInsert.firstChild) wrapper.appendChild(fragmentToInsert.firstChild);
               range.insertNode(wrapper);
+
+              preserveAiContext(range.commonAncestorContainer);
             }
           }
           window.getSelection()?.removeAllRanges();
@@ -627,10 +646,74 @@ export function DocumentEditor() {
   };
 
 
+  // Helper to preserve AI context (questions, spacers) when user edits
+  const preserveAiContext = useCallback((startNode: Node) => {
+    let currentBlock = startNode.nodeType === Node.ELEMENT_NODE
+      ? startNode as HTMLElement
+      : startNode.parentElement;
+
+    // 1. Untag the current block (User is editing it)
+    while (currentBlock && editorRef.current && editorRef.current.contains(currentBlock) && currentBlock !== editorRef.current) {
+      if (currentBlock.getAttribute('data-ai-text') === 'true') {
+        currentBlock.removeAttribute('data-ai-text');
+      }
+
+      // 2. Check preceding siblings for Questions + Spacers
+      let sibling = currentBlock.previousElementSibling as HTMLElement | null;
+      let siblingsToUntag: HTMLElement[] = [];
+
+      while (sibling) {
+        const isAi = sibling.getAttribute('data-ai-text') === 'true';
+        let isQuestion = sibling.getAttribute('data-ai-question') === 'true';
+
+        // Deep check: If sibling is an AI container but not explicitly a question, 
+        // check if its last flow content is a question.
+        if (isAi && !isQuestion && sibling.lastElementChild) {
+          let inner = sibling.lastElementChild as HTMLElement;
+          // Traverse backwards inside the container to find the "active" end content
+          while (inner) {
+            const innerAi = inner.getAttribute('data-ai-text') === 'true';
+            const innerQuestion = inner.getAttribute('data-ai-question') === 'true';
+
+            // If we hit non-AI text inside, we stop.
+            if (!innerAi) break;
+
+            if (innerQuestion) {
+              isQuestion = true;
+              break;
+            }
+            inner = inner.previousElementSibling as HTMLElement;
+          }
+        }
+
+        if (!isAi) break; // Stop if we hit human text
+
+        if (isQuestion) {
+          siblingsToUntag.push(sibling);
+          // Found the question, un-tag everything in between
+          siblingsToUntag.forEach(el => {
+            el.removeAttribute('data-ai-text');
+            // Also untag any children (like spans) that might be hidden
+            el.querySelectorAll('[data-ai-text="true"]').forEach(child => child.removeAttribute('data-ai-text'));
+          });
+          break; // Done with this chain
+        }
+
+        siblingsToUntag.push(sibling);
+        sibling = sibling.previousElementSibling as HTMLElement | null;
+      }
+
+      currentBlock = currentBlock.parentElement;
+    }
+  }, []);
+
   const insertStyledText = (text: string) => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || !editorRef.current) return;
     const range = selection.getRangeAt(0);
+
+
+    preserveAiContext(range.commonAncestorContainer);
 
     // Clear placeholder logic
     if (editorRef.current) {
@@ -760,6 +843,8 @@ export function DocumentEditor() {
       range.collapse(false);
     }
 
+    preserveAiContext(range.commonAncestorContainer);
+
     // Clear placeholder logic if we're at the beginning and the placeholder is there
     const firstChild = editorRef.current.firstElementChild;
     if (firstChild && firstChild.tagName === 'P') {
@@ -881,6 +966,16 @@ export function DocumentEditor() {
           <div className="w-3" />
           <button onClick={() => handleFormat('insertUnorderedList')} className="p-1.5 hover:text-gray-700 transition-colors" title="Bullet List"><List className="w-4 h-4" style={{ transform: 'scale(1.1)' }} /></button>
           <button onClick={() => handleFormat('insertOrderedList')} className="p-1.5 hover:text-gray-700 transition-colors" title="Numbered List"><ListOrdered className="w-4 h-4" style={{ transform: 'scale(1.1)' }} /></button>
+          <button onClick={() => handleFormat('insertOrderedList')} className="p-1.5 hover:text-gray-700 transition-colors" title="Numbered List"><ListOrdered className="w-4 h-4" style={{ transform: 'scale(1.1)' }} /></button>
+          <div className="w-3" />
+
+          <button
+            onClick={() => setShowAiText(!showAiText)}
+            className={`p-1.5 hover:text-gray-700 transition-colors ${!showAiText ? 'text-gray-700 bg-gray-100 rounded' : ''}`}
+            title={showAiText ? "Hide AI Text" : "Show AI Text"}
+          >
+            {showAiText ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+          </button>
           <div className="w-3" />
 
           <button type="button" className="p-1.5 hover:text-gray-700 transition-colors disabled:opacity-50" title="AI Review (Cmd+Enter)" disabled={aiLoading} aria-label="AI Review" onClick={handleAiReview}>
@@ -1005,6 +1100,16 @@ export function DocumentEditor() {
           </>
         )}
       </div>
+
+      {!showAiText && (
+        <style dangerouslySetInnerHTML={{
+          __html: `
+            [data-ai-text="true"] {
+              display: none !important;
+            }
+          `
+        }} />
+      )}
 
       <LineHeightHandle editorRef={editorRef} />
     </div>

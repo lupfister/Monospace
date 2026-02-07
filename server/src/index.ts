@@ -5,6 +5,7 @@ import cors from 'cors';
 import {
   handleAgentSearch,
   handleExpand,
+  handleFullReview,
   handleImprove,
   handlePlanSearch,
   handleReviewSkeletonNotes,
@@ -88,6 +89,42 @@ app.post('/api/ai/search', async (req: any, res: any) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error('Agent search error:', message);
     return res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// Error classification helper
+function classifyError(error: unknown): string {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  if (message.includes('rate limit') || message.includes('429')) return 'rate_limit';
+  if (message.includes('network') || message.includes('fetch')) return 'network';
+  if (message.includes('content policy') || message.includes('safety')) return 'content_policy';
+  if (message.includes('aborted') || message.includes('cancel')) return 'cancelled';
+  return 'unknown';
+}
+
+// Unified review endpoint - batches planning, search, and narrative into one call
+app.post('/api/ai/review', async (req: any, res: any) => {
+  const { text, model } = req.body || {};
+  console.log(`[API] /review request: text len: ${text?.length}, model: ${model}`);
+
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({
+      ok: false,
+      error: { type: 'validation', message: 'Missing or invalid "text" field.' }
+    });
+  }
+
+  try {
+    const result = await handleFullReview(text, model);
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const errorType = classifyError(error);
+    console.error('[/api/ai/review] Error:', errorType, message);
+    return res.status(500).json({
+      ok: false,
+      error: { type: errorType, message }
+    });
   }
 });
 

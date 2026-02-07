@@ -2,7 +2,7 @@ import { resultCardClasses, type ResultItem } from './searchResultItems';
 import { isImageUrl } from './linkPreviews';
 import { createAiTextBlock } from './domUtils';
 import { createAiTextWithLinksFragment, createAiTextSpan, createStyledSourceLink } from './textStyles';
-import type { SkeletonNotes, SkeletonNoteBlock } from './openaiAgentApi';
+import type { SkeletonNotes, SkeletonNoteBlock, AiError } from './openaiAgentApi';
 
 
 /**
@@ -13,24 +13,134 @@ import type { SkeletonNotes, SkeletonNoteBlock } from './openaiAgentApi';
  * 4. Content should allow for natural cursor movement and text selection.
  */
 
+// Loading phase type
+export type LoadingPhase = 'planning' | 'searching' | 'generating';
 
-export const createInlineResultCard = (item: ResultItem): HTMLDivElement => {
-    const isMedia = item.type === 'video' || item.type === 'image';
+const PHASE_MESSAGES: Record<LoadingPhase, string> = {
+    planning: 'Understanding your text...',
+    searching: 'Exploring sources...',
+    generating: 'Crafting response...',
+};
+
+/**
+ * Creates a shimmer loading indicator that appears in the document during AI review.
+ * Shows horizontal shimmering lines with a phase message.
+ */
+export const createLoadingShimmer = (phase: LoadingPhase = 'planning'): HTMLDivElement => {
     const container = document.createElement('div');
+    container.className = 'ai-loading-shimmer';
+    container.dataset.loadingPhase = phase;
+    container.contentEditable = 'false';
+    container.style.cssText = `
+    display: block;
+    margin: 16px 0;
+    padding: 12px 0;
+    user-select: none;
+    pointer-events: none;
+  `;
 
-    container.className = resultCardClasses.item;
-    container.dataset.resultType = item.type;
-    if (item.url) container.dataset.url = item.url;
-    if (isMedia) container.contentEditable = 'false';
+    // Phase message
+    const phaseText = document.createElement('div');
+    phaseText.className = 'shimmer-phase-text';
+    phaseText.textContent = PHASE_MESSAGES[phase];
+    phaseText.style.cssText = `
+    color: #6e6e6e;
+    font-size: 13px;
+    margin-bottom: 12px;
+    font-style: italic;
+    line-height: 1.5;
+  `;
+    container.appendChild(phaseText);
+
+    // Shimmer lines (3 horizontal bars with random widths)
+    for (let i = 0; i < 3; i++) {
+        const line = document.createElement('div');
+        line.className = 'shimmer-line';
+        const width = 60 + Math.random() * 35; // 60-95% width for variety
+        line.style.cssText = `
+      height: 14px;
+      width: ${width}%;
+      background: linear-gradient(
+        90deg,
+        #f0f0f0 0%,
+        #e0e0e0 20%,
+        #f0f0f0 40%,
+        #f0f0f0 100%
+      );
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 4px;
+      margin-bottom: 8px;
+    `;
+        container.appendChild(line);
+    }
+
+    return container;
+};
+
+/**
+ * Updates the phase message on an existing shimmer element.
+ */
+export const updateShimmerPhase = (shimmer: HTMLElement, phase: LoadingPhase): void => {
+    shimmer.dataset.loadingPhase = phase;
+    const phaseText = shimmer.querySelector('.shimmer-phase-text');
+    if (phaseText) {
+        phaseText.textContent = PHASE_MESSAGES[phase];
+    }
+};
+
+/**
+ * Creates an error block to display when AI review fails.
+ */
+export const createErrorBlock = (error: AiError): HTMLDivElement => {
+    const container = document.createElement('div');
+    container.className = 'ai-error-block';
+    container.contentEditable = 'false';
+    container.style.cssText = `
+    padding: 12px 16px;
+    background: #fef2f2;
+    border-left: 3px solid #ef4444;
+    border-radius: 4px;
+    margin: 16px 0;
+  `;
+
+    const message = document.createElement('div');
+    message.style.cssText = 'color: #dc2626; font-size: 14px; margin-bottom: 4px; line-height: 1.5;';
+    message.textContent = error.message;
+    container.appendChild(message);
+
+    if (error.suggestion) {
+        const suggestion = document.createElement('div');
+        suggestion.style.cssText = 'color: #9ca3af; font-size: 12px; line-height: 1.5;';
+        suggestion.textContent = error.suggestion;
+        container.appendChild(suggestion);
+    }
+
+    return container;
+};
+
+
+export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
+    const fragment = document.createDocumentFragment();
+    const isMedia = item.type === 'video' || item.type === 'image';
 
     if (item.type === 'image' || item.type === 'video') {
         const imageUrl = item.thumbnail || item.url || '';
+
+        // 1. Media Line (Image/Video)
         if (imageUrl) {
-            // Create wrapper for better layout control
-            const mediaWrapper = document.createElement('div');
+            const mediaPara = document.createElement('p');
+            mediaPara.style.lineHeight = '0'; // Tighter wrapping for media
+
+            // Wrapper is still useful for relative positioning of play icon
+            const mediaWrapper = document.createElement('span'); // Span to be inline-ish but effective
+            mediaWrapper.contentEditable = 'false'; // IMPORTANT: Unit as a whole
+            mediaWrapper.style.display = 'inline-block';
             mediaWrapper.style.position = 'relative';
             mediaWrapper.style.overflow = 'hidden';
-            mediaWrapper.style.borderRadius = '8px';
+            // mediaWrapper.style.borderRadius = '8px'; // Removed rounded corners
+            mediaWrapper.style.maxWidth = '100%';
+            mediaWrapper.style.verticalAlign = 'top'; // Align nicely with text flow if needed
 
             const img = document.createElement('img');
             if (isImageUrl(imageUrl)) {
@@ -41,27 +151,26 @@ export const createInlineResultCard = (item: ResultItem): HTMLDivElement => {
             }
             if (item.url) img.dataset.fallbackUrl = item.url;
             img.alt = item.title || (item.type === 'video' ? 'Video thumbnail' : 'Image');
-            img.className = resultCardClasses.image;
-            img.style.minHeight = '200px';
+
+            // Standardize image styling, but without "card" background
+            img.style.minHeight = '160px'; // Slightly smaller than card
             img.style.maxHeight = '400px';
-            img.style.width = '100%';
+            img.style.width = 'auto'; // allow natural aspect ratio? or 100%?
+            img.style.maxWidth = '100%';
             img.style.objectFit = 'cover';
             img.style.backgroundColor = 'var(--color-gray-100, #f3f4f6)';
             img.loading = 'lazy';
             img.referrerPolicy = 'no-referrer';
 
-            // On error, try proxy if we haven't already, otherwise hide.
+            // On error, remove the wrapper (and thus the image)
             img.onerror = () => {
                 const currentSrc = img.src;
                 if (!currentSrc.includes('/api/ai/image')) {
                     img.src = `/api/ai/image?url=${encodeURIComponent(imageUrl)}`;
                     return;
                 }
-
-                if (container.parentNode) {
-                    container.parentNode.removeChild(container);
-                } else {
-                    container.style.display = 'none';
+                if (mediaWrapper.parentNode) {
+                    mediaWrapper.parentNode.removeChild(mediaWrapper);
                 }
             };
 
@@ -70,7 +179,7 @@ export const createInlineResultCard = (item: ResultItem): HTMLDivElement => {
             // Add video play icon overlay for videos
             if (item.type === 'video') {
                 const playIcon = document.createElement('div');
-                playIcon.innerHTML = `<svg width="64" height="64" viewBox="0 0 24 24" fill="white" style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));">
+                playIcon.innerHTML = `<svg width="48" height="48" viewBox="0 0 24 24" fill="white" style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));">
                     <circle cx="12" cy="12" r="10" fill="rgba(0,0,0,0.6)"/>
                     <path d="M10 8l6 4-6 4V8z" fill="white"/>
                 </svg>`;
@@ -81,66 +190,69 @@ export const createInlineResultCard = (item: ResultItem): HTMLDivElement => {
                 playIcon.style.pointerEvents = 'none';
                 playIcon.style.opacity = '0.9';
                 mediaWrapper.appendChild(playIcon);
-            }
 
-            container.appendChild(mediaWrapper);
-
-            // Add title/caption below media
-            if (item.title) {
-                const caption = document.createElement('div');
-                // caption.style.marginTop = '8px'; // Removed CSS gap
-                caption.appendChild(document.createElement('br')); // Use break for separation
-                caption.style.fontSize = '13px';
-                caption.style.lineHeight = '1.5';
-                caption.style.color = '#374151';
-                caption.style.fontWeight = '500';
-                caption.textContent = item.title;
-                container.appendChild(caption);
-            }
-
-            // Make the whole card clickable for videos
-            if (item.type === 'video' && item.url) {
-                container.style.cursor = 'pointer';
-                container.style.transition = 'transform 0.2s, box-shadow 0.2s';
-                container.onclick = () => {
-                    window.open(item.url, '_blank', 'noopener,noreferrer');
-                };
-                container.onmouseenter = () => {
-                    container.style.transform = 'translateY(-2px)';
-                    container.style.boxShadow = '0 4px 12px rgba(0,0,0,0.1)';
-                };
-                container.onmouseleave = () => {
-                    container.style.transform = 'translateY(0)';
-                    container.style.boxShadow = '';
+                // Click behavior for video
+                mediaWrapper.style.cursor = 'pointer';
+                mediaWrapper.onclick = () => {
+                    if (item.url) window.open(item.url, '_blank', 'noopener,noreferrer');
                 };
             }
 
-            // For images, add a subtle link if URL exists
-            if (item.type === 'image' && item.url) {
-                const linkWrapper = document.createElement('div');
-                // linkWrapper.style.marginTop = '6px'; // Removed CSS gap
-                linkWrapper.appendChild(document.createElement('br'));
-                const sourceLink = createStyledSourceLink(item.url, 'View source');
-                linkWrapper.appendChild(sourceLink);
-                container.appendChild(linkWrapper);
-            }
+            mediaPara.appendChild(mediaWrapper);
+            fragment.appendChild(mediaPara);
         }
-        return container;
+
+        // 2. Link/Title Line
+        if (item.title || item.url) {
+            const linkPara = document.createElement('p');
+            linkPara.style.lineHeight = '1.5';
+
+            // Use title or domain as label
+            let label = item.title;
+            if (!label && item.url) {
+                try {
+                    label = new URL(item.url).hostname;
+                } catch {
+                    label = 'View source';
+                }
+            }
+            if (!label) label = 'View source';
+
+            if (item.url) {
+                const link = createStyledSourceLink(item.url, label);
+                linkPara.appendChild(link);
+            } else {
+                linkPara.appendChild(createAiTextSpan(label));
+            }
+
+            fragment.appendChild(linkPara);
+        }
+
+        return fragment;
     }
 
     if (item.type === 'article') {
+        const container = document.createElement('div'); // Keep article container for now or refactor? 
+        // User asked for "image/video embeds". 
+        // We'll return a fragment containing the div to match return type.
+
+        container.className = resultCardClasses.item; // Keep existing style for articles
+        container.dataset.resultType = item.type;
+        if (item.url) container.dataset.url = item.url;
+
         container.appendChild(createAiTextBlock(item.snippet || item.title));
         if (item.url) {
             const articleLabel = item.title || 'Open article';
             const linkWrapper = document.createElement('div');
-            // linkWrapper.className = 'mt-2'; // Removed CSS gap
             linkWrapper.appendChild(document.createElement('br'));
             linkWrapper.appendChild(createStyledSourceLink(item.url, articleLabel));
             container.appendChild(linkWrapper);
         }
+        fragment.appendChild(container); // Wrap in fragment
+        return fragment;
     }
 
-    return container;
+    return fragment;
 };
 
 const createSpacer = () => {
@@ -346,9 +458,20 @@ export const buildSearchResultsBlock = async (
         const s = i.snippet.trim();
         const len = s.length;
 
-        // Filter out obvious meta-descriptions/summaries
-        if (/^(this|the) (video|article|page|paper|study|site|website|research|report|post|entry)/i.test(s)) return false;
-        if (/^video exploring/i.test(s)) return false;
+        // STRICT: Filter out AI-generated summaries - must be direct source text
+        // Reject snippets that start with summary phrases
+        const aiSummaryPatterns = [
+            /^(this|the|a|an) (video|article|page|paper|study|site|website|research|report|post|entry|piece|chapter|book|guide|tutorial|blog|review|analysis|document|source|resource|content|section|text|work|publication|journal)/i,
+            /^video exploring/i,
+            /^(this|it) (covers?|discusses?|explains?|describes?|explores?|examines?|analyzes?|reviews?|presents?|shows?|demonstrates?|provides?|offers?|outlines?|details?|focuses?)/i,
+            /^(the author|authors?|researcher|researchers?|writer|study|research|article|paper) (cover|discuss|explain|describe|explore|examine|analyze|review|present|show|demonstrate|provide|offer|outline|detail|focus)/i,
+            /^(here|in this|according to)/i,
+            /^(an? )?(overview|summary|introduction|explanation|description|analysis) (of|to)/i
+        ];
+
+        for (const pattern of aiSummaryPatterns) {
+            if (pattern.test(s)) return false;
+        }
 
         return len >= 40 && len <= 400;
     });
@@ -364,28 +487,21 @@ export const buildSearchResultsBlock = async (
     const excerptItem = sortedSnippets[0];
 
     if (excerptItem) {
-        const block = document.createElement('div');
-        // Standardize as a block
-        block.style.display = 'block';
-
+        // Render excerpt as plain italic text (no link parsing to avoid duplicates)
         const excerptText = `"${excerptItem.snippet || ''}"`;
-        const excerptFragment = createAiTextWithLinksFragment(excerptText, '1.5');
 
-        excerptFragment.querySelectorAll('span').forEach((span) => {
-            (span as HTMLSpanElement).style.fontStyle = 'italic';
-            (span as HTMLSpanElement).style.lineHeight = '1.5';
-        });
+        const excerptP = document.createElement('p');
+        excerptP.style.lineHeight = '1.5';
 
-        // Wrap in p for consistent spacing behavior if it looks like text
-        const p = document.createElement('p');
-        p.style.lineHeight = '1.5';
-        p.appendChild(excerptFragment);
+        const excerptSpan = createAiTextSpan(excerptText);
+        excerptSpan.style.fontStyle = 'italic';
+        excerptP.appendChild(excerptSpan);
 
-        fragment.appendChild(p);
+        fragment.appendChild(excerptP);
 
-        // Restore the source link (always useful, especially if excerpt has no links)
+        // Single source link below the excerpt (the ONLY link)
         if (excerptItem.url) {
-            const linkWrapper = document.createElement('p'); // Use p for validation
+            const linkWrapper = document.createElement('p');
             linkWrapper.style.lineHeight = '1.5';
             linkWrapper.appendChild(createStyledSourceLink(
                 excerptItem.url,

@@ -33,6 +33,7 @@ export const createAiTextSpan = (text: string, lineHeight?: string): HTMLSpanEle
   if (lineHeight) {
     span.style.lineHeight = lineHeight;
   }
+  span.style.whiteSpace = 'pre-wrap';
   span.textContent = text;
   return span;
 };
@@ -165,6 +166,7 @@ export const createHumanTextSpan = (text: string, lineHeight?: string): HTMLSpan
   if (lineHeight) {
     span.style.lineHeight = lineHeight;
   }
+  span.style.whiteSpace = 'pre-wrap';
   span.textContent = text;
   return span;
 };

@@ -1,11 +1,11 @@
-export type GeminiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search';
+export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search';
 
-export type GeminiSearchType = 'video' | 'image' | 'web';
+export type SearchType = 'video' | 'image' | 'web';
 
-export type GeminiSearchPlan = {
+export type SearchPlan = {
   shouldSearch: boolean;
   queries: Array<{
-    type: GeminiSearchType;
+    type: SearchType;
     query: string;
     reason?: string;
   }>;
@@ -26,7 +26,7 @@ export interface AgentSearchRequest {
   query: string;
 }
 
-export interface GeminiGenerateResult {
+export interface GenerateResult {
   text: string;
   ok: true;
 }
@@ -37,25 +37,39 @@ export type SkeletonNoteBlock =
 
 export interface SkeletonNotes {
   blocks: SkeletonNoteBlock[];
-  searchTag?: string; // e.g. [SEARCH_ALL: query]
+  searchTag?: string;
 }
 
-export interface GeminiErrorResult {
+export interface ErrorResult {
   ok: false;
   error: string;
 }
 
-export type GeminiResult = GeminiGenerateResult | GeminiErrorResult;
+export type AiResult = GenerateResult | ErrorResult;
 
-type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search';
+// Structured error type for better UX
+export interface AiError {
+  type: 'network' | 'rate_limit' | 'content_policy' | 'no_results' | 'cancelled' | 'validation' | 'unknown';
+  message: string;
+  suggestion?: string;
+}
 
-const mapGeminiActionToAiAction = (action: GeminiAction): AiAction => {
+// Unified review result
+export interface FullReviewResult {
+  plan: SearchPlan;
+  searchResults: AgentSearchResult[];
+  narrative: SkeletonNotes;
+}
+
+type InternalAiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search';
+
+const mapActionToInternal = (action: AiAction): InternalAiAction => {
   if (action === 'search') return 'plan_search';
   return action;
 };
 
 const postAiAction = async <TResponse>(body: {
-  action: AiAction;
+  action: InternalAiAction;
   text: string;
   model?: string | null;
   searchContext?: unknown;
@@ -82,17 +96,17 @@ const postAiAction = async <TResponse>(body: {
   }
 };
 
-export const generateWithGemini = async (
-  action: GeminiAction,
+export const generateWithOpenAI = async (
+  action: AiAction,
   selectedText: string,
   model?: string | null,
-): Promise<GeminiResult> => {
+): Promise<AiResult> => {
   const trimmed = selectedText.trim();
   if (!trimmed) {
     return { ok: false, error: 'No text provided.' };
   }
 
-  const aiAction = mapGeminiActionToAiAction(action);
+  const aiAction = mapActionToInternal(action);
 
   try {
     const data = await postAiAction<{ ok: boolean; text: string }>({
@@ -115,7 +129,7 @@ export const generateWithGemini = async (
   }
 };
 
-export const fetchSkeletonNotesWithGemini = async (
+export const fetchSkeletonNotes = async (
   text: string,
   model?: string | null,
   searchContext?: unknown,
@@ -137,7 +151,6 @@ export const fetchSkeletonNotesWithGemini = async (
       return { ok: false, error: 'Empty response from AI.' };
     }
 
-    // Parse the output which is JSON followed by an optional search tag
     const textOutput = data.text;
     const jsonEndIndex = textOutput.lastIndexOf('}') + 1;
     const jsonPart = textOutput.slice(0, jsonEndIndex).trim();
@@ -162,10 +175,10 @@ export const fetchSkeletonNotesWithGemini = async (
   }
 };
 
-export const planSearchWithGemini = async (
+export const planSearch = async (
   text: string,
   model?: string | null,
-): Promise<GeminiSearchPlan> => {
+): Promise<SearchPlan> => {
   const trimmed = text.trim();
   if (!trimmed) {
     return { shouldSearch: false, queries: [] };
@@ -174,7 +187,7 @@ export const planSearchWithGemini = async (
   try {
     const data = await postAiAction<{
       ok: boolean;
-      plan?: GeminiSearchPlan;
+      plan?: SearchPlan;
     }>({
       action: 'plan_search',
       text: trimmed,
@@ -193,7 +206,7 @@ export const planSearchWithGemini = async (
       return { shouldSearch: false, queries: [] };
     }
 
-    const normalizedQueries: GeminiSearchPlan['queries'] = [];
+    const normalizedQueries: SearchPlan['queries'] = [];
     for (const q of plan.queries) {
       if (!q || typeof q !== 'object') continue;
       const type = q.type;
@@ -211,7 +224,7 @@ export const planSearchWithGemini = async (
 
     return {
       shouldSearch: plan.shouldSearch,
-      queries: normalizedQueries.slice(0, 3),
+      queries: normalizedQueries,
     };
   } catch {
     return { shouldSearch: false, queries: [] };
@@ -249,6 +262,89 @@ export const searchWithAgent = async (
 };
 
 /**
+ * Unified review function - calls the batched /api/ai/review endpoint
+ * which handles planning, parallel search, and narrative generation in one call.
+ * Supports cancellation via AbortSignal.
+ */
+export const fullReview = async (
+  text: string,
+  model?: string | null,
+  signal?: AbortSignal
+): Promise<{ ok: true; data: FullReviewResult } | { ok: false; error: AiError }> => {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      error: { type: 'validation', message: 'No text provided.' }
+    };
+  }
+
+  try {
+    const res = await fetch('/api/ai/review', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: trimmed, model: model ?? undefined }),
+      signal,
+    });
+
+    const data = await res.json();
+
+    if (!res.ok || data.ok === false) {
+      const errorObj = data.error;
+      return {
+        ok: false,
+        error: typeof errorObj === 'object' && errorObj !== null
+          ? {
+            type: errorObj.type || 'unknown',
+            message: errorObj.message || 'Request failed',
+            suggestion: getSuggestionForError(errorObj.type),
+          }
+          : { type: 'unknown', message: String(errorObj) || 'Request failed' }
+      };
+    }
+
+    return {
+      ok: true,
+      data: {
+        plan: data.plan,
+        searchResults: data.searchResults || [],
+        narrative: data.narrative || { blocks: [] },
+      }
+    };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return {
+        ok: false,
+        error: { type: 'cancelled', message: 'Request cancelled' }
+      };
+    }
+    return {
+      ok: false,
+      error: {
+        type: 'network',
+        message: error instanceof Error ? error.message : 'Network error',
+        suggestion: 'Check your internet connection and try again.'
+      }
+    };
+  }
+};
+
+function getSuggestionForError(type: string): string | undefined {
+  switch (type) {
+    case 'rate_limit':
+      return 'Please wait a moment and try again.';
+    case 'network':
+      return 'Check your internet connection and try again.';
+    case 'content_policy':
+      return 'Try rephrasing your text to avoid potentially sensitive content.';
+    case 'validation':
+      return 'Please provide some text to review.';
+    default:
+      return undefined;
+  }
+}
+
+/**
  * OpenAI model IDs that support the Agents API and hosted web search
  * (GPT-4o and GPT-4.1 series). Ordered by price ascending (cheapest first).
  * Rough per-1M tokens: 4o-mini $0.15/$0.60, 4.1-mini $0.80/$3.20, 4.1 $2/$8.
@@ -258,4 +354,3 @@ export const OPENAI_MODEL_OPTIONS: readonly string[] = [
   'gpt-4.1-mini',
   'gpt-4.1',
 ];
-

@@ -1,14 +1,14 @@
 import { Agent, run, webSearchTool } from '@openai/agents';
 import { z } from 'zod';
 
-export type GeminiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search';
+export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search';
 
-export type GeminiSearchType = 'video' | 'image' | 'web';
+export type SearchType = 'video' | 'image' | 'web';
 
-export type GeminiSearchPlan = {
+export type SearchPlan = {
   shouldSearch: boolean;
   queries: Array<{
-    type: GeminiSearchType;
+    type: SearchType;
     query: string;
     reason?: string;
   }>;
@@ -24,7 +24,7 @@ const SEARCH_PLAN_SCHEMA = z.object({
         reason: z.string().optional(),
       }),
     )
-    .max(3),
+    .max(10),
 });
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
@@ -163,7 +163,7 @@ ${t} `;
   );
 };
 
-export const handlePlanSearch = async (text: string, model?: string | null): Promise<GeminiSearchPlan> => {
+export const handlePlanSearch = async (text: string, model?: string | null): Promise<SearchPlan> => {
   ensureApiKey();
   // Use same model as search so plan quality matches execution (nano doesn't support web search; plan with mini).
   const modelToUse = getModelForSearch(model);
@@ -172,7 +172,7 @@ export const handlePlanSearch = async (text: string, model?: string | null): Pro
 
   const prompt = `You are an Expert Search Strategist. Your goal is to maximize "serendipity"—finding content that connects the user's text to unexpected fields, history, or future possibilities. Avoid the obvious.
 
-Analyze the user's text and craft up to 3 strategic queries.
+Analyze the user's text and craft strategic queries. Use as few queries as needed to get high-quality results (typically 2-5).
 
 Return ONLY valid JSON:
 type Plan = {
@@ -246,7 +246,7 @@ const AGENT_SEARCH_QUERY_SCHEMA = z.object({
 });
 
 const AGENT_SEARCH_REQUEST_SCHEMA = z.object({
-  queries: z.array(AGENT_SEARCH_QUERY_SCHEMA).max(3),
+  queries: z.array(AGENT_SEARCH_QUERY_SCHEMA).max(10),
 });
 
 const normalizeJsonText = (value: string): string => {
@@ -398,20 +398,91 @@ export const handleAgentSearch = async (
 ): Promise<AgentSearchResult[]> => {
   ensureApiKey();
 
-  const results: AgentSearchResult[] = [];
-  for (const query of queries) {
-    try {
-      const queryResults = await runSearchAgentForQuery(query, modelOverride);
-      results.push(...queryResults);
-    } catch (error) {
-      console.warn('Agent search failed for query', query.query, error);
-    }
-  }
+  // Execute all searches in parallel for speed
+  const searchPromises = queries.map(query =>
+    runSearchAgentForQuery(query, modelOverride)
+      .catch(error => {
+        console.warn('[handleAgentSearch] Query failed:', query.query, error);
+        return []; // Return empty on failure, don't break other queries
+      })
+  );
 
-  return results;
+  const allResults = await Promise.all(searchPromises);
+  return allResults.flat();
 };
 
 export const parseAgentSearchRequest = (body: unknown) => {
   return AGENT_SEARCH_REQUEST_SCHEMA.safeParse(body);
+};
+
+// Skeleton Notes types
+export type SkeletonNoteBlock =
+  | { kind: 'ai'; text: string }
+  | { kind: 'input'; prompt: string; lines: number };
+
+export interface SkeletonNotes {
+  blocks: SkeletonNoteBlock[];
+  searchTag?: string;
+}
+
+// Parse skeleton notes from AI response
+export const parseSkeletonNotes = (text: string): SkeletonNotes => {
+  const jsonEndIndex = text.lastIndexOf('}') + 1;
+  const jsonPart = text.slice(0, jsonEndIndex).trim();
+  const tagPart = text.slice(jsonEndIndex).trim();
+
+  try {
+    const parsed = JSON.parse(jsonPart) as { blocks: SkeletonNoteBlock[] };
+    return {
+      blocks: parsed.blocks || [],
+      searchTag: tagPart || undefined,
+    };
+  } catch (e) {
+    console.error('[parseSkeletonNotes] Failed to parse JSON:', e, 'Raw:', text);
+    return { blocks: [] };
+  }
+};
+
+// Unified review handler - does planning, search, and narrative in one call
+export interface FullReviewResult {
+  plan: SearchPlan;
+  searchResults: AgentSearchResult[];
+  narrative: SkeletonNotes;
+}
+
+export const handleFullReview = async (
+  text: string,
+  model?: string | null,
+): Promise<FullReviewResult> => {
+  // 1. Plan search
+  console.log('[handleFullReview] Starting plan phase...');
+  const plan = await handlePlanSearch(text, model);
+  console.log('[handleFullReview] Plan:', plan);
+
+  // 2. Execute searches in parallel (if needed)
+  let searchResults: AgentSearchResult[] = [];
+  if (plan.shouldSearch && plan.queries.length > 0) {
+    console.log('[handleFullReview] Executing', plan.queries.length, 'searches in parallel...');
+    // Map SearchType to AgentSearchResultType ('web' -> 'article')
+    const agentQueries: AgentSearchQuery[] = plan.queries.map(q => ({
+      type: q.type === 'web' ? 'article' : q.type,
+      query: q.query,
+      reason: q.reason,
+    }));
+    searchResults = await handleAgentSearch(agentQueries, model);
+    console.log('[handleFullReview] Got', searchResults.length, 'search results');
+  }
+
+  // 3. Generate narrative with search context
+  const searchContext = searchResults.length > 0
+    ? searchResults.map(r => `Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet || ''}`).join('\n\n')
+    : undefined;
+
+  console.log('[handleFullReview] Generating narrative...');
+  const narrativeText = await handleReviewSkeletonNotes(text, model, searchContext);
+  const narrative = parseSkeletonNotes(narrativeText);
+  console.log('[handleFullReview] Generated', narrative.blocks.length, 'blocks');
+
+  return { plan, searchResults, narrative };
 };
 

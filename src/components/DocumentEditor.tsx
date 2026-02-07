@@ -51,9 +51,9 @@ export function DocumentEditor() {
   const lineHeightDragStart = useRef<{ y: number; initialHeight: number } | null>(null);
 
   const [selectedModel, setSelectedModel] = useState('gpt-4o-mini');
-  const { handleAiReview, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(editorRef, selectedModel, hydrateSearchResultImages);
+  const { handleAiReview, cancelReview, isLoading, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(editorRef, selectedModel, hydrateSearchResultImages);
 
-  const isBusy = aiLoading || isSearching;
+  const isBusy = isLoading;
 
   // Track selection changes to support toolbar actions that steal focus (like Select)
   useEffect(() => {
@@ -654,41 +654,58 @@ export function DocumentEditor() {
 
     if (!range.collapsed) range.deleteContents();
 
-    let targetSpan: HTMLElement | null = null;
-    let canAppend = false;
+    // If we are inside a text node that belongs to a human span, just insert the text
     if (range.startContainer.nodeType === Node.TEXT_NODE) {
       const textNode = range.startContainer as Text;
       const parent = textNode.parentElement;
-      if (parent && parent.tagName === 'SPAN' && isHumanTextSpan(parent)) {
-        if (range.startOffset === (textNode.textContent?.length || 0)) {
-          targetSpan = parent;
-          canAppend = true;
+      if (parent && (parent.tagName === 'SPAN' && isHumanTextSpan(parent))) {
+        const offset = range.startOffset;
+        textNode.insertData(offset, text);
+        range.setStart(textNode, offset + text.length);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return;
+      }
+    }
+
+    // If we are at the end of a human span (but maybe range.startContainer is the SPAN itself)
+    if (range.startContainer.nodeType === Node.ELEMENT_NODE) {
+      const element = range.startContainer as HTMLElement;
+      if (element.tagName === 'SPAN' && isHumanTextSpan(element)) {
+        const textNode = element.firstChild as Text;
+        if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+          const offset = range.startOffset;
+          textNode.insertData(offset, text);
+          range.setStart(textNode, offset + text.length);
+          range.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          return;
         }
       }
     }
 
-    if (targetSpan && canAppend) {
-      targetSpan.appendChild(document.createTextNode(text));
-      const newRange = document.createRange();
-      newRange.selectNodeContents(targetSpan);
-      newRange.collapse(false);
-      selection.removeAllRanges();
-      selection.addRange(newRange);
-    } else {
-      // Helper to calculate line height
-      // Simplified here for brevity but logic should ideally be preserved
-      const span = createHumanTextSpan(text, '1');
-      range.insertNode(span);
-      range.setStartAfter(span);
-      range.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(range);
-    }
+    // Default: create a new human span
+    const span = createHumanTextSpan(text, '1');
+    range.insertNode(span);
+    range.setStart(span.firstChild!, text.length);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
   };
 
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
     const ctrlKey = isMac ? e.metaKey : e.ctrlKey;
+
+    // Cancel AI review with Escape
+    if (e.key === 'Escape' && isLoading) {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelReview();
+      return;
+    }
 
     if (ctrlKey && e.key === 'Enter') {
       e.preventDefault();
@@ -951,7 +968,7 @@ export function DocumentEditor() {
             ref={editorRef}
             contentEditable
             suppressContentEditableWarning
-            className="min-h-screen bg-white p-8 focus:outline-none prose prose-lg max-w-3xl mx-auto font-normal [&_p]:my-0 [&_p]:min-h-[1.5em]"
+            className="min-h-screen bg-white p-8 focus:outline-none prose prose-lg max-w-3xl mx-auto font-normal [&_p]:my-0 [&_p]:min-h-[1.5em] whitespace-pre-wrap"
             spellCheck
             onMouseDown={handleMouseDown}
             onClick={handleClick}

@@ -1,24 +1,60 @@
-import { useState, useCallback } from 'react';
-import { planSearchWithGemini, searchWithAgent, type AgentSearchRequest, fetchSkeletonNotesWithGemini, type SkeletonNotes } from '../lib/openaiAgentApi';
-import { buildSearchResultsBlock } from '../lib/searchRenderers';
+import { useState, useCallback, useRef } from 'react';
+import { fullReview, type AiError, type AgentSearchResult } from '../lib/openaiAgentApi';
+import {
+    buildSearchResultsBlock,
+    createLoadingShimmer,
+    updateShimmerPhase,
+    type LoadingPhase
+} from '../lib/searchRenderers';
 import { orderedSearchResultsToItems } from '../lib/searchResultItems';
+
+export type ReviewPhase = 'idle' | 'planning' | 'searching' | 'generating' | 'rendering';
 
 export function useSearchAgent(
     editorRef: React.RefObject<HTMLDivElement>,
     selectedModel: string,
     hydrateSearchResultImages: (root: HTMLElement | null) => void
 ) {
-    const [aiLoading, setAiLoading] = useState(false);
-    const [aiError, setAiError] = useState<string | null>(null);
-    const [isSearching, setIsSearching] = useState(false);
+    const [phase, setPhase] = useState<ReviewPhase>('idle');
+    const [error, setError] = useState<AiError | null>(null);
 
+    const abortControllerRef = useRef<AbortController | null>(null);
+    const shimmerRef = useRef<HTMLElement | null>(null);
+
+    /**
+     * Cancels any in-progress AI review.
+     * Removes the shimmer from the document and resets state.
+     */
+    const cancelReview = useCallback(() => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+            abortControllerRef.current = null;
+        }
+        // Clean up shimmer if present
+        if (shimmerRef.current && shimmerRef.current.parentNode) {
+            shimmerRef.current.parentNode.removeChild(shimmerRef.current);
+            shimmerRef.current = null;
+        }
+        setPhase('idle');
+    }, []);
+
+    /**
+     * Triggers AI review on the current selection or entire document.
+     * Inserts a shimmer loading indicator and calls the batched API endpoint.
+     */
     const handleAiReview = useCallback(async () => {
-        if (!editorRef.current || aiLoading || isSearching) return;
+        if (!editorRef.current || phase !== 'idle') return;
 
-        setAiError(null);
-        setAiLoading(true);
+        // Cancel any existing request
+        cancelReview();
+
+        setError(null);
+
+        // Create new abort controller
+        abortControllerRef.current = new AbortController();
 
         try {
+            // Get text to review
             const selection = window.getSelection();
             let textToReview = '';
             let range: Range | null = null;
@@ -32,92 +68,111 @@ export function useSearchAgent(
 
             const trimmedText = textToReview.trim();
             if (!trimmedText) {
-                setAiLoading(false);
                 return;
             }
 
-            // 1. Plan Search
-            const plan = await planSearchWithGemini(trimmedText, selectedModel);
-            console.log('[useSearchAgent] Plan:', plan);
+            // Insert shimmer loading state
+            setPhase('planning');
+            const shimmer = createLoadingShimmer('planning');
+            shimmerRef.current = shimmer;
 
-            let searchResults: any[] = [];
-            let searchContext: string | undefined = undefined;
-
-            // 2. Execute Search (if needed)
-            if (plan.shouldSearch && plan.queries.length > 0) {
-                setIsSearching(true);
-                const agentQueries: AgentSearchRequest[] = plan.queries.map(q => ({
-                    type: q.type === 'web' ? 'article' : q.type,
-                    query: q.query
-                }));
-
-                try {
-                    searchResults = await searchWithAgent(agentQueries, selectedModel);
-                    console.log('[useSearchAgent] Search Results:', searchResults);
-                    if (searchResults.length > 0) {
-                        // Prepare context for the narrative agent
-                        searchContext = searchResults.map(r => `Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet || ''}`).join('\n\n');
-                    }
-                } catch (e) {
-                    console.error('Search failed', e);
-                } finally {
-                    setIsSearching(false);
+            // Insert after selection or at end of document
+            if (range) {
+                range.collapse(false);
+                range.insertNode(shimmer);
+            } else {
+                const lastChild = editorRef.current.lastChild;
+                const newRange = document.createRange();
+                if (lastChild) {
+                    newRange.setStartAfter(lastChild);
+                } else {
+                    newRange.setStart(editorRef.current, 0);
                 }
+                newRange.collapse(true);
+                newRange.insertNode(shimmer);
             }
 
-            // 3. Generate Narrative (Skeleton Notes) - Passing Search Context
-            const skeletonResult = await fetchSkeletonNotesWithGemini(trimmedText, selectedModel, searchContext);
-            const notes = skeletonResult.ok ? skeletonResult.notes : undefined;
+            // Update shimmer phase as we progress
+            setPhase('searching');
+            updateShimmerPhase(shimmer, 'searching');
 
-            // 4. Render Combined Output
-            if (searchResults.length > 0 || (notes && notes.blocks.length > 0)) {
-                // Check if notes requested *more* search (unlikely given the new order, but we can support it if we want to loop, but let's just stick to the initial search for now or do a quick secondary fetch if absolutely needed. For now, we trust the initial search is sufficient.)
+            // Make the unified API call
+            const result = await fullReview(
+                trimmedText,
+                selectedModel,
+                abortControllerRef.current.signal
+            );
 
-                // One edge case: If the narrative decided to add a search tag despite us already searching, do we search again?
-                // The prompt says "After the JSON, if you think web search results would be helpful..."
-                // Since we already searched, we might want to skip this or treat it as "additional" queries.
-                // Let's keep it simple: We use the already-fetched results. If we really want to support the "post-generation" search tag, we could.
-                // But the user asked for "searching should always precede the narrative". So we consider the loop closed.
-                // However, we might want to MERGE any *extra* media queries?
-                // Actually, let's just rely on the initial plan.
+            if (!result.ok) {
+                // Remove shimmer, set error
+                shimmer.remove();
+                shimmerRef.current = null;
 
-                // 3. Render integrated block
-                const resultItems = orderedSearchResultsToItems(searchResults as any);
-                const resultsFragment = await buildSearchResultsBlock(resultItems, notes);
-
-                // 4. Insert into editor
-                if (range) {
-                    range.collapse(false); // Insert after selection
-                    // Simply insert the fragment. It contains proper blocks (p/div) and spacers.
-                    range.insertNode(resultsFragment);
-                } else {
-                    const lastChild = editorRef.current.lastChild;
-                    const newRange = document.createRange();
-                    if (lastChild) {
-                        newRange.setStartAfter(lastChild);
-                    } else {
-                        newRange.setStart(editorRef.current, 0);
-                    }
-                    newRange.collapse(true);
-                    newRange.insertNode(resultsFragment);
+                if (result.error.type !== 'cancelled') {
+                    setError(result.error);
                 }
+                setPhase('idle');
+                return;
+            }
+
+            // Update shimmer to "generating" during render phase
+            setPhase('generating');
+            updateShimmerPhase(shimmer, 'generating');
+
+            // Build and insert results
+            const { searchResults, narrative } = result.data;
+
+            if (searchResults.length > 0 || (narrative && narrative.blocks.length > 0)) {
+                const resultItems = orderedSearchResultsToItems(searchResults as AgentSearchResult[]);
+                const resultsFragment = await buildSearchResultsBlock(resultItems, narrative);
+
+                // Replace shimmer with results
+                shimmer.replaceWith(resultsFragment);
+                shimmerRef.current = null;
 
                 hydrateSearchResultImages(editorRef.current);
             } else {
-                setAiError("AI decided no search or review was needed for this text.");
+                // No results - remove shimmer, set error
+                shimmer.remove();
+                shimmerRef.current = null;
+                setError({
+                    type: 'no_results',
+                    message: 'AI decided no search or review was needed for this text.',
+                    suggestion: 'Try selecting a different passage or adding more context.'
+                });
             }
         } catch (err) {
-            setAiError(err instanceof Error ? err.message : String(err));
+            // Clean up shimmer on unexpected error
+            if (shimmerRef.current) {
+                shimmerRef.current.remove();
+                shimmerRef.current = null;
+            }
+
+            if (err instanceof DOMException && err.name === 'AbortError') {
+                // Cancelled - already handled
+                setPhase('idle');
+                return;
+            }
+
+            setError({
+                type: 'unknown',
+                message: err instanceof Error ? err.message : String(err)
+            });
         } finally {
-            setAiLoading(false);
+            setPhase('idle');
+            abortControllerRef.current = null;
         }
-    }, [editorRef, selectedModel, hydrateSearchResultImages, aiLoading, isSearching]);
+    }, [editorRef, selectedModel, hydrateSearchResultImages, phase, cancelReview]);
 
     return {
         handleAiReview,
-        aiLoading,
-        aiError,
-        isSearching,
-        setAiError
+        cancelReview,
+        phase,
+        isLoading: phase !== 'idle',
+        // Legacy compatibility aliases
+        aiLoading: phase !== 'idle',
+        isSearching: phase === 'searching',
+        aiError: error,
+        setAiError: setError
     };
 }

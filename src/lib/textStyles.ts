@@ -156,6 +156,47 @@ export const createStyledSourceLink = (url: string, label: string): HTMLElement 
 
 
 /**
+ * Creates a reusable caret icon for toggling visibility interactions.
+ * Default state is "collapsed" (pointing right).
+ * 
+ * @param onClick Handler for click event. The element itself is passed as argument.
+ * @param initialState 'collapsed' | 'expanded'
+ */
+export const createInteractionCaret = (
+  onClick: (e: MouseEvent, caret: HTMLElement) => void,
+  initialState: 'collapsed' | 'expanded' = 'collapsed'
+): HTMLElement => {
+  const caret = document.createElement('span');
+  // Simple chevron pointing right (collapsed)
+  caret.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: inline; vertical-align: middle;"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
+
+  caret.style.display = 'inline-flex';
+  caret.style.alignItems = 'center';
+  caret.style.justifyContent = 'center';
+  caret.style.width = '16px';
+  caret.style.height = '16px';
+  caret.style.transition = 'transform 0.2s ease';
+  caret.style.color = '#6e6e6e'; // Match AI text color
+  caret.style.cursor = 'pointer';
+  caret.contentEditable = 'false';
+  caret.style.userSelect = 'none';
+  // If expanded, rotate 90deg to point down
+  caret.style.transform = initialState === 'expanded' ? 'rotate(90deg)' : 'rotate(0deg)';
+
+  caret.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClick(e, caret);
+  };
+
+  // Add a class for identification if needed
+  caret.classList.add('interaction-caret');
+
+  return caret;
+};
+
+
+/**
  * Creates a span element with human/user text styling
  */
 export const createHumanTextSpan = (text: string, lineHeight?: string): HTMLSpanElement => {

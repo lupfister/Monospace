@@ -1,7 +1,7 @@
 import { resultCardClasses, type ResultItem } from './searchResultItems';
 import { isImageUrl } from './linkPreviews';
 import { createAiTextBlock } from './domUtils';
-import { createAiTextWithLinksFragment, createAiTextSpan, createStyledSourceLink } from './textStyles';
+import { createAiTextWithLinksFragment, createAiTextSpan, createStyledSourceLink, createInteractionCaret } from './textStyles';
 import type { SkeletonNotes, SkeletonNoteBlock, AiError } from './openaiAgentApi';
 
 
@@ -20,6 +20,60 @@ const PHASE_MESSAGES: Record<LoadingPhase, string> = {
     planning: 'Understanding your text...',
     searching: 'Exploring sources...',
     generating: 'Crafting response...',
+};
+
+/**
+ * Creates a collapsible block with a caret and label, matching the source summary style.
+ */
+const createCollapsibleAiBlock = (label: string, content: Node, initialState: 'collapsed' | 'expanded' = 'collapsed'): HTMLDivElement => {
+    const container = document.createElement('div');
+    container.dataset.aiText = 'true';
+    container.className = 'ai-collapsible-block';
+    container.style.clear = 'both';
+
+    const header = document.createElement('div');
+    header.style.lineHeight = '1.5';
+    header.style.position = 'relative';
+
+    const listContainer = document.createElement('div');
+    listContainer.style.display = initialState === 'collapsed' ? 'none' : 'block';
+    if (initialState === 'collapsed') {
+        listContainer.setAttribute('data-ai-hidden', 'true');
+    } else {
+        listContainer.setAttribute('data-ai-revealed', 'true');
+    }
+    listContainer.appendChild(content);
+
+    const caret = createInteractionCaret((_e, c) => {
+        const isCurrentlyExpanded = c.style.transform.includes('90deg');
+        if (isCurrentlyExpanded) {
+            // Collapse
+            c.style.transform = 'rotate(0deg)';
+            listContainer.style.display = 'none';
+            listContainer.setAttribute('data-ai-hidden', 'true');
+            listContainer.removeAttribute('data-ai-revealed');
+        } else {
+            // Expand
+            c.style.transform = 'rotate(90deg)';
+            listContainer.style.display = 'block';
+            listContainer.removeAttribute('data-ai-hidden');
+            listContainer.setAttribute('data-ai-revealed', 'true');
+        }
+    }, initialState);
+
+    caret.style.float = 'left';
+    caret.style.clear = 'both';
+    caret.style.marginLeft = '-28px';
+    caret.style.marginTop = '4px';
+    caret.style.marginRight = '12px';
+
+    const labelSpan = createAiTextSpan(label);
+    header.appendChild(caret);
+    header.appendChild(labelSpan);
+
+    container.appendChild(header);
+    container.appendChild(listContainer);
+    return container;
 };
 
 /**
@@ -132,6 +186,7 @@ export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
         // 1. Media Line (Image/Video)
         if (imageUrl) {
             const mediaPara = document.createElement('p');
+            mediaPara.dataset.aiText = 'true';
             mediaPara.style.lineHeight = '0'; // Tighter wrapping for media
 
             // Wrapper is still useful for relative positioning of play icon
@@ -292,6 +347,7 @@ export const buildSearchResultsBlock = async (
     // Helper to add safe text block
     const addTextBlock = (content: DocumentFragment | string) => {
         const p = document.createElement('p');
+        p.dataset.aiText = 'true';
         p.style.lineHeight = '1.5';
         if (typeof content === 'string') {
             p.textContent = content;
@@ -379,49 +435,10 @@ export const buildSearchResultsBlock = async (
     // 1. Sources Section (Viewed Sources) - TOP PRIORITY
     const sourceCount = infoItems.length;
     if (sourceCount > 0) {
-        // Container for all sources
-        const sourcesContainer = document.createElement('div');
-        sourcesContainer.dataset.aiText = 'true';
-        // sourcesContainer.className = 'mb-2'; // Removed CSS gap
-
-        // Header
-        const headerDiv = document.createElement('div');
-        // headerDiv.className = 'flex items-center gap-1 mb-1'; // Removed CSS layouts
-        headerDiv.style.lineHeight = '1.5';
-
-        // Larger lined caret icon (SVG chevron)
-        const caret = document.createElement('span');
-        caret.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: inline; vertical-align: middle;"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
-        caret.style.display = 'inline';
-        caret.style.transition = 'transform 0.2s';
-        caret.style.color = '#6e6e6e';
-        caret.style.marginRight = '4px'; // Tiny text spacing
-
-        const headerSpan = createAiTextSpan(`Viewed ${sourceCount} source${sourceCount === 1 ? '' : 's'}`);
-        headerDiv.appendChild(caret);
-        headerDiv.appendChild(headerSpan);
-
-        // Sources list container (initially hidden)
-        const listContainer = document.createElement('div');
-        listContainer.style.display = 'none';
-        // listContainer.style.paddingLeft = '4px'; // Removed CSS indent
-        // listContainer.style.marginTop = '4px';
-
-        // Toggle visibility on caret click
-        let isOpen = false;
-        caret.style.cursor = 'pointer';
-        caret.contentEditable = 'false';
-        caret.onclick = (e) => {
-            e.stopPropagation();
-            isOpen = !isOpen;
-            listContainer.style.display = isOpen ? 'block' : 'none';
-            caret.style.transform = isOpen ? 'rotate(90deg)' : 'rotate(0deg)';
-        };
-
-        // Each source using the unified component
+        // Create the sources list
+        const listFragment = document.createDocumentFragment();
         infoItems.forEach((item) => {
             if (item.url) {
-                // Use title first as it's most descriptive, then source, then domain from URL
                 let label = item.title || item.source;
                 if (!label) {
                     try {
@@ -431,21 +448,19 @@ export const buildSearchResultsBlock = async (
                         label = 'Source';
                     }
                 }
-
                 const sourceDiv = document.createElement('div');
                 sourceDiv.style.lineHeight = '1.5';
-                // sourceDiv.className = 'mb-0.5';
                 sourceDiv.appendChild(createStyledSourceLink(item.url, label));
-                listContainer.appendChild(sourceDiv);
+                listFragment.appendChild(sourceDiv);
             }
         });
 
-        sourcesContainer.appendChild(headerDiv);
-        sourcesContainer.appendChild(listContainer);
+        const label = `Viewed ${sourceCount} source${sourceCount === 1 ? '' : 's'}`;
+        const sourcesBlock = createCollapsibleAiBlock(label, listFragment, 'collapsed');
 
-        fragment.appendChild(createSpacer()); // Added gap above sources
-        fragment.appendChild(sourcesContainer);
-        fragment.appendChild(createSpacer()); // Valid paragraph spacer
+        fragment.appendChild(createSpacer());
+        fragment.appendChild(sourcesBlock);
+        fragment.appendChild(createSpacer());
     }
 
     // 2. Media Section (Images/Videos)
@@ -525,8 +540,10 @@ export const buildSearchResultsBlock = async (
 
     // 4. Information Section (AI Narrative)
     if (notes) {
-        notes.blocks.forEach((block) => {
-            if (block.kind === 'ai') {
+        const aiBlocks = notes.blocks.filter(b => b.kind === 'ai');
+        if (aiBlocks.length > 0) {
+            const aiContent = document.createDocumentFragment();
+            aiBlocks.forEach((block) => {
                 const aiP = document.createElement('p');
                 aiP.dataset.aiText = 'true';
                 if (block.text.trim().match(/\?$/)) {
@@ -534,13 +551,15 @@ export const buildSearchResultsBlock = async (
                 }
                 aiP.style.lineHeight = '1.5';
 
-                // Strict Sanitization
                 const sanitizedText = block.text.replace(/\[([^\]]*)\]\(([^)]+)\)/g, '$1');
                 aiP.appendChild(createAiTextWithLinksFragment(sanitizedText, '1.5'));
-                fragment.appendChild(aiP);
-                fragment.appendChild(createSpacer());
-            }
-        });
+                aiContent.appendChild(aiP);
+                aiContent.appendChild(createSpacer());
+            });
+
+            const narrativeBlock = createCollapsibleAiBlock('Note', aiContent, 'expanded');
+            fragment.appendChild(narrativeBlock);
+        }
 
         // 5. Questions Section (Input Blocks) - LAST
         notes.blocks.forEach((block) => {

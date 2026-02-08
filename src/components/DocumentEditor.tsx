@@ -11,7 +11,7 @@ import {
   Eye,
   EyeOff
 } from 'lucide-react';
-import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan } from '../lib/textStyles';
+import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan, createInteractionCaret } from '../lib/textStyles';
 import { isProbablyUrl } from '../lib/linkPreviews';
 
 import { useLinkHydrator } from '../hooks/useLinkHydrator';
@@ -57,7 +57,7 @@ export function DocumentEditor() {
   const { handleAiReview, cancelReview, isLoading, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(editorRef, selectedModel, hydrateSearchResultImages);
 
   const isBusy = isLoading;
-
+  const observerRef = useRef<MutationObserver | null>(null);
   // Track selection changes to support toolbar actions that steal focus (like Select)
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -73,6 +73,218 @@ export function DocumentEditor() {
     document.addEventListener('selectionchange', handleSelectionChange);
     return () => document.removeEventListener('selectionchange', handleSelectionChange);
   }, []);
+
+  const updateAiVisibility = useCallback((shouldShow: boolean) => {
+    if (!editorRef.current) return;
+    const editor = editorRef.current;
+
+    // Disconnect temporarily to avoid update loops
+    if (observerRef.current) observerRef.current.disconnect();
+
+    const reobserve = () => {
+      if (editor && observerRef.current) {
+        observerRef.current.observe(editor, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['data-ai-text']
+        });
+      }
+    };
+
+    try {
+      // Helper to identify AI content
+      const isAiNode = (n: HTMLElement) => n.getAttribute('data-ai-text') === 'true';
+
+      // Helper to identify "gaps" (empty lines, BRs, etc.)
+      const isGapNode = (n: HTMLElement) => {
+        if (n.classList.contains('interaction-caret')) return false;
+        if (n.tagName === 'BR') return true;
+        const text = n.textContent?.trim() || '';
+        const hasMedia = n.querySelector('img, video, iframe, svg, canvas');
+        return text === '' && !hasMedia;
+      };
+
+      // 1. Structured blocks
+      const structuredBlocks = editor.querySelectorAll('.ai-collapsible-block');
+      structuredBlocks.forEach((block: Element) => {
+        const b = block as HTMLElement;
+        const caret = b.querySelector('.interaction-caret') as HTMLElement | null;
+        const content = b.lastElementChild as HTMLElement | null;
+        if (!caret || !content) return;
+
+        if (shouldShow) {
+          caret.style.transform = 'rotate(90deg)';
+          content.style.display = 'block';
+          content.removeAttribute('data-ai-hidden');
+          content.setAttribute('data-ai-revealed', 'true');
+        } else {
+          caret.style.transform = 'rotate(0deg)';
+          content.style.display = 'none';
+          content.setAttribute('data-ai-hidden', 'true');
+          content.removeAttribute('data-ai-revealed');
+        }
+      });
+
+      // 2. Loose text
+      (Array.from(editor.querySelectorAll('.interaction-caret')) as HTMLElement[]).forEach(c => {
+        if (!c.closest('.ai-collapsible-block')) c.remove();
+      });
+
+      if (shouldShow) {
+        (Array.from(editor.querySelectorAll('[data-ai-text="true"]')) as HTMLElement[]).forEach(node => {
+          if (!node.closest('.ai-collapsible-block')) {
+            node.style.display = '';
+            node.removeAttribute('data-ai-hidden');
+          }
+        });
+      } else {
+        const children = Array.from(editor.children) as HTMLElement[];
+        const groups: HTMLElement[][] = [];
+        let currentGroup: HTMLElement[] = [];
+
+        children.forEach((node) => {
+          if (node.classList.contains('ai-collapsible-block') || node.closest('.ai-collapsible-block')) {
+            if (currentGroup.length > 0) groups.push(currentGroup);
+            currentGroup = [];
+            return;
+          }
+          if (node.classList.contains('interaction-caret')) return;
+
+          const isQuestion = node.getAttribute('data-ai-question') === 'true';
+
+          if (isQuestion) {
+            // A question always starts its own group
+            if (currentGroup.length > 0) groups.push(currentGroup);
+            currentGroup = [node];
+          } else if (isAiNode(node) || (isGapNode(node) && currentGroup.length > 0)) {
+            // AI text or gaps following AI content stay in the current group
+            currentGroup.push(node);
+          } else {
+            // Non-AI content breaks the group
+            if (currentGroup.length > 0) groups.push(currentGroup);
+            currentGroup = [];
+          }
+        });
+        if (currentGroup.length > 0) groups.push(currentGroup);
+
+        groups.forEach((group: HTMLElement[]) => {
+          const hasContent = group.some((n: HTMLElement) => isAiNode(n) && (n.textContent?.trim() !== '' || n.querySelector('img, video, svg')));
+          if (!hasContent) {
+            group.forEach((n: HTMLElement) => {
+              n.style.display = 'none';
+              n.setAttribute('data-ai-hidden', 'true');
+            });
+            return;
+          }
+          const isGroupRevealed = group.some((n: HTMLElement) => n.getAttribute('data-ai-revealed') === 'true');
+
+          const shutter = createInteractionCaret((_e: MouseEvent, caret: HTMLElement) => {
+            const isExpanded = caret.style.transform.includes('90deg');
+            group.forEach((n: HTMLElement, i: number) => {
+              if (isExpanded) {
+                // Collapse: Hide content but keep first node as a vertical placeholder
+                n.setAttribute('data-ai-hidden', 'true');
+                n.removeAttribute('data-ai-revealed');
+                if (i === 0) {
+                  n.style.display = 'block';
+                  n.style.height = '1.5em';
+                  n.style.overflow = 'hidden';
+                  n.style.visibility = 'hidden';
+                } else {
+                  n.style.display = 'none';
+                }
+              } else {
+                // Expand: Show all content
+                n.style.display = '';
+                n.style.height = '';
+                n.style.overflow = '';
+                n.style.visibility = '';
+                n.removeAttribute('data-ai-hidden');
+                n.setAttribute('data-ai-revealed', 'true');
+              }
+            });
+            caret.style.transform = isExpanded ? 'rotate(0deg)' : 'rotate(90deg)';
+          }, isGroupRevealed ? 'expanded' : 'collapsed');
+
+          shutter.style.float = 'left';
+          shutter.style.clear = 'both';
+          shutter.style.marginLeft = '-28px';
+          shutter.style.marginTop = '4px';
+          shutter.style.marginRight = '12px';
+          shutter.style.userSelect = 'none';
+          shutter.setAttribute('contenteditable', 'false');
+
+          editor.insertBefore(shutter, group[0]);
+          group.forEach((n: HTMLElement, i: number) => {
+            if (isGroupRevealed) {
+              n.style.display = '';
+              n.style.height = '';
+              n.style.overflow = '';
+              n.style.visibility = '';
+              n.removeAttribute('data-ai-hidden');
+            } else {
+              // Initial hidden state: Keep first node as a line placeholder
+              n.setAttribute('data-ai-hidden', 'true');
+              if (i === 0) {
+                n.style.display = 'block';
+                n.style.height = '1.5em';
+                n.style.overflow = 'hidden';
+                n.style.visibility = 'hidden';
+              } else {
+                n.style.display = 'none';
+              }
+            }
+          });
+        });
+      }
+    } finally {
+      reobserve();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!editorRef.current) return;
+
+    const observer = new MutationObserver((mutations) => {
+      let needsUpdate = false;
+      mutations.forEach((m) => {
+        if (m.type === 'childList') {
+          (Array.from(m.addedNodes) as Node[]).forEach((node) => {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              const el = node as HTMLElement;
+              if (el.getAttribute('data-ai-text') === 'true' && !el.classList.contains('interaction-caret')) {
+                needsUpdate = true;
+              }
+            }
+          });
+          (Array.from(m.removedNodes) as Node[]).forEach((node) => {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              const el = node as HTMLElement;
+              if (el.getAttribute('data-ai-text') === 'true' && !el.classList.contains('interaction-caret')) {
+                needsUpdate = true;
+              }
+            }
+          });
+        }
+        if (m.type === 'attributes' && m.attributeName === 'data-ai-text') {
+          const target = m.target as HTMLElement;
+          if (!target.classList.contains('interaction-caret')) {
+            needsUpdate = true;
+          }
+        }
+      });
+
+      if (needsUpdate) {
+        updateAiVisibility(showAiText);
+      }
+    });
+
+    observerRef.current = observer;
+    updateAiVisibility(showAiText);
+
+    return () => observer.disconnect();
+  }, [showAiText, updateAiVisibility]);
 
   // Auto-set margin side when there are texts
   useEffect(() => {
@@ -260,7 +472,26 @@ export function DocumentEditor() {
 
   const handleSave = () => {
     if (editorRef.current) {
+      // Temporarily remove shutters and reveal content for clean saving
+      const shutters = editorRef.current.querySelectorAll('.interaction-caret');
+      const hiddenElements = editorRef.current.querySelectorAll('[data-ai-hidden="true"]');
+
+      shutters.forEach(el => el.remove());
+      hiddenElements.forEach(el => {
+        (el as HTMLElement).style.display = '';
+        el.removeAttribute('data-ai-hidden');
+      });
+
       const content = editorRef.current.innerHTML;
+
+      // We don't restore the UI state here because the MutationObserver/Effect will likely 
+      // kick in or the user will reload. For a perfect UX we might want to restore,
+      // but "Save" implies capturing the document state.
+      // Re-running the visibility logic is safest to ensure consistency.
+      if (!showAiText) {
+        updateAiVisibility(false);
+      }
+
       localStorage.setItem('documentContent', content);
 
       const notification = document.createElement('div');
@@ -581,13 +812,18 @@ export function DocumentEditor() {
       let needsNormalization = false;
 
       // Check if there are any text nodes or inline elements at the root level
-      for (const child of children) {
+      for (const childNode of children) {
+        const child = childNode as ChildNode;
         if (child.nodeType === Node.TEXT_NODE && child.textContent?.trim()) {
           needsNormalization = true;
           break;
         }
         if (child.nodeType === Node.ELEMENT_NODE) {
-          const elem = child as Element;
+          const elem = child as HTMLElement;
+          // Ignore our special AI elements and harmless tags
+          if (elem.classList.contains('interaction-caret') || elem.classList.contains('ai-collapsible-block') || ['BR', 'HR'].includes(elem.tagName)) {
+            continue;
+          }
           if (!['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'UL', 'OL', 'LI'].includes(elem.tagName)) {
             needsNormalization = true;
             break;
@@ -596,13 +832,56 @@ export function DocumentEditor() {
       }
 
       if (needsNormalization) {
+        // Save cursor position using a marker
+        let markerId = `restoration-marker-${Date.now()}`;
+        const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+        if (range && editorRef.current.contains(range.commonAncestorContainer)) {
+          const marker = document.createElement('span');
+          marker.id = markerId;
+          marker.style.display = 'none';
+          try {
+            range.insertNode(marker);
+          } catch (err) {
+            markerId = '';
+          }
+        } else {
+          markerId = '';
+        }
+
         const fragment = document.createDocumentFragment();
         let currentP: HTMLParagraphElement | null = null;
 
-        for (const child of children) {
-          if (child.nodeType === Node.TEXT_NODE ||
-            (child.nodeType === Node.ELEMENT_NODE &&
-              !['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'UL', 'OL'].includes((child as Element).tagName))) {
+        // Re-read children because we inserted a marker
+        Array.from(editorRef.current.childNodes).forEach((childNode) => {
+          const child = childNode as ChildNode;
+          const isText = child.nodeType === Node.TEXT_NODE;
+          const isElement = child.nodeType === Node.ELEMENT_NODE;
+          const elem = isElement ? child as HTMLElement : null;
+
+          // Special case: Restoration marker
+          if (elem && elem.id === markerId) {
+            if (currentP) {
+              currentP.appendChild(child.cloneNode(true));
+            } else {
+              fragment.appendChild(child.cloneNode(true));
+            }
+            return;
+          }
+
+          // Special case: AI Carets and Structured blocks should NOT be wrapped
+          if (elem && (elem.classList.contains('interaction-caret') || elem.classList.contains('ai-collapsible-block'))) {
+            currentP = null;
+            fragment.appendChild(child.cloneNode(true));
+            return;
+          }
+
+          // Important: Skip whitespace nodes at the root level during reconstruction
+          // to prevent them from being wrapped in new paragraphs (creating empty lines).
+          if (isText && !child.textContent?.trim()) {
+            return;
+          }
+
+          if (isText || (isElement && elem && !['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'UL', 'OL', 'LI'].includes(elem.tagName))) {
             // Wrap in a paragraph
             if (!currentP) {
               currentP = document.createElement('p');
@@ -619,26 +898,39 @@ export function DocumentEditor() {
             }
             fragment.appendChild(blockElem);
           }
-        }
+        });
 
         // Save cursor position
         const savedSelection = selection && selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
 
-        editorRef.current.innerHTML = '';
-        editorRef.current.appendChild(fragment);
+        // Disconnect observer during normalization to avoid loops
+        if (observerRef.current) observerRef.current.disconnect();
 
-        // Restore cursor position if possible
-        if (savedSelection && selection) {
-          try {
-            selection.removeAllRanges();
-            selection.addRange(savedSelection);
-          } catch (e) {
-            // If restoration fails, place cursor at end
-            const range = document.createRange();
-            range.selectNodeContents(editorRef.current);
-            range.collapse(false);
-            selection.removeAllRanges();
-            selection.addRange(range);
+        try {
+          editorRef.current.innerHTML = '';
+          editorRef.current.appendChild(fragment);
+
+          // Restore cursor position using the marker
+          if (markerId) {
+            const newMarker = editorRef.current.querySelector(`#${markerId}`);
+            if (newMarker && selection) {
+              const newRange = document.createRange();
+              newRange.setStartBefore(newMarker);
+              newRange.collapse(true);
+              selection.removeAllRanges();
+              selection.addRange(newRange);
+              newMarker.remove();
+            }
+          }
+        } finally {
+          // Re-observe
+          if (editorRef.current && observerRef.current) {
+            observerRef.current.observe(editorRef.current, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+              attributeFilter: ['data-ai-text']
+            });
           }
         }
       }
@@ -652,10 +944,37 @@ export function DocumentEditor() {
       ? startNode as HTMLElement
       : startNode.parentElement;
 
+    // 0. Check if we are editing a "shutter" (caret) itself or near it
+    // If we're inside a shutter, we should probably stop? 
+    // But contentEditable=false on shutters helps.
+
     // 1. Untag the current block (User is editing it)
     while (currentBlock && editorRef.current && editorRef.current.contains(currentBlock) && currentBlock !== editorRef.current) {
       if (currentBlock.getAttribute('data-ai-text') === 'true') {
         currentBlock.removeAttribute('data-ai-text');
+        currentBlock.removeAttribute('data-ai-hidden'); // Ensure it's visible if it was somehow hidden
+        currentBlock.style.display = ''; // Force show
+
+        // Determine if there is a shutter associated with this block
+        const prev = currentBlock.previousElementSibling;
+        if (prev && (prev as HTMLElement).classList?.contains('interaction-caret')) {
+          prev.remove();
+        }
+
+        // Handle structured blocks: if this is a group or inside one, clean up the header
+        const group = currentBlock.classList.contains('ai-collapsible-block')
+          ? currentBlock
+          : currentBlock.closest('.ai-collapsible-block') as HTMLElement | null;
+
+        if (group && group.getAttribute('data-ai-text')) {
+          group.removeAttribute('data-ai-text');
+          const header = group.querySelector('div'); // The header
+          if (header && !header.getAttribute('data-ai-text')) {
+            // Only remove if it's the header of THIS structured group
+            // (which doesn't have data-ai-text itself but contains the caret)
+            header.remove();
+          }
+        }
       }
 
       // 2. Check preceding siblings for Questions + Spacers
@@ -663,6 +982,12 @@ export function DocumentEditor() {
       let siblingsToUntag: HTMLElement[] = [];
 
       while (sibling) {
+        // Skip shutters
+        if (sibling.classList.contains('interaction-caret')) {
+          sibling = sibling.previousElementSibling as HTMLElement | null;
+          continue;
+        }
+
         const isAi = sibling.getAttribute('data-ai-text') === 'true';
         let isQuestion = sibling.getAttribute('data-ai-question') === 'true';
 
@@ -691,10 +1016,16 @@ export function DocumentEditor() {
         if (isQuestion) {
           siblingsToUntag.push(sibling);
           // Found the question, un-tag everything in between
-          siblingsToUntag.forEach(el => {
+          siblingsToUntag.forEach((el: HTMLElement) => {
             el.removeAttribute('data-ai-text');
             // Also untag any children (like spans) that might be hidden
-            el.querySelectorAll('[data-ai-text="true"]').forEach(child => child.removeAttribute('data-ai-text'));
+            el.querySelectorAll('[data-ai-text="true"]').forEach((child: Element) => (child as HTMLElement).removeAttribute('data-ai-text'));
+
+            // Remove any associated shutters for these untagged elements
+            const prevShutter = el.previousElementSibling as HTMLElement | null;
+            if (prevShutter && prevShutter.classList.contains('interaction-caret')) {
+              prevShutter.remove();
+            }
           });
           break; // Done with this chain
         }
@@ -895,22 +1226,22 @@ export function DocumentEditor() {
   };
 
   const handleMarginTextPositionChange = (id: string, x: number, y: number) => {
-    setMarginTexts(prev => prev.map(m => m.id === id ? { ...m, x, y } : m));
+    setMarginTexts((prev: MarginTextData[]) => prev.map((m: MarginTextData) => m.id === id ? { ...m, x, y } : m));
   };
 
   const handleMarginTextDelete = (id: string) => {
-    setMarginTexts(prev => prev.filter(m => m.id !== id));
+    setMarginTexts((prev: MarginTextData[]) => prev.filter((m: MarginTextData) => m.id !== id));
   };
 
   const handleMarginTextContentChange = (id: string, htmlContent: string) => {
-    setMarginTexts(prev => prev.map(m => m.id === id ? { ...m, htmlContent } : m));
+    setMarginTexts((prev: MarginTextData[]) => prev.map((m: MarginTextData) => m.id === id ? { ...m, htmlContent } : m));
   };
 
   const handleMarginTextExpand = (id: string) => {
     const marginText = marginTexts.find(m => m.id === id);
     if (!marginText || !editorRef.current) return;
     editorRef.current.innerHTML = marginText.htmlContent;
-    setMarginTexts(prev => prev.filter(m => m.id !== id));
+    setMarginTexts((prev: MarginTextData[]) => prev.filter((m: MarginTextData) => m.id !== id));
     editorRef.current.focus();
   };
 
@@ -1101,15 +1432,7 @@ export function DocumentEditor() {
         )}
       </div>
 
-      {!showAiText && (
-        <style dangerouslySetInnerHTML={{
-          __html: `
-            [data-ai-text="true"] {
-              display: none !important;
-            }
-          `
-        }} />
-      )}
+
 
       <LineHeightHandle editorRef={editorRef} />
     </div>

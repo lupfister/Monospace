@@ -1,6 +1,6 @@
 export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search';
 
-export type SearchType = 'video' | 'image' | 'web';
+export type SearchType = 'web';
 
 export type SearchPlan = {
   shouldSearch: boolean;
@@ -11,14 +11,18 @@ export type SearchPlan = {
   }>;
 };
 
-export type AgentSearchType = 'video' | 'article' | 'image';
+export type AgentSearchType = 'article';
 
 export interface AgentSearchResult {
   type: AgentSearchType;
   title: string;
   url: string;
   snippet?: string;
-  thumbnail?: string;
+}
+
+export interface GeneratedCode {
+  code: string;
+  description: string;
 }
 
 export interface AgentSearchRequest {
@@ -216,7 +220,7 @@ export const planSearch = async (
     for (const q of plan.queries) {
       if (!q || typeof q !== 'object') continue;
       const type = q.type;
-      if (type !== 'video' && type !== 'image' && type !== 'web') continue;
+      if (type !== 'web') continue;
       const query = typeof q.query === 'string' ? q.query.trim() : '';
       if (!query) continue;
       const reason =
@@ -361,3 +365,41 @@ export const OPENAI_MODEL_OPTIONS: readonly string[] = [
   'gpt-4.1-mini',
   'gpt-4.1',
 ];
+
+export const generateCreativeCoding = async (
+  narrativeContext: string,
+  model?: string | null,
+  signal?: AbortSignal
+): Promise<{ ok: boolean; code?: string; description?: string; error?: string }> => {
+  try {
+    const res = await fetch('/api/ai/creative-coding', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        context: narrativeContext,
+        model: model ?? undefined
+      }),
+      signal
+    });
+
+    const data = await res.json();
+
+    if (!res.ok || data.ok === false) {
+      return { ok: false, error: data.error || 'Failed to generate creative code' };
+    }
+
+    return {
+      ok: true,
+      code: data.code,
+      description: data.description
+    };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return { ok: false, error: 'Request cancelled' };
+    }
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+};

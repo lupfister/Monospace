@@ -5,16 +5,20 @@ import {
     buildSearchResultsBlock,
     createLoadingShimmer,
     updateShimmerPhase,
+    createVisualExperiencePlaceholder,
+    renderVisualExperience,
     type LoadingPhase
 } from '../lib/searchRenderers';
 import { orderedSearchResultsToItems } from '../lib/searchResultItems';
+import { generateCreativeCoding } from '../lib/openaiAgentApi';
 
-export type ReviewPhase = 'idle' | 'planning' | 'searching' | 'generating' | 'rendering';
+
+export type ReviewPhase = 'idle' | 'planning' | 'searching' | 'generating' | 'rendering' | 'generating_code';
 
 export function useSearchAgent(
     editorRef: React.RefObject<HTMLDivElement>,
     selectedModel: string,
-    hydrateSearchResultImages: (root: HTMLElement | null) => void
+
 ) {
     const [phase, setPhase] = useState<ReviewPhase>('idle');
     const [error, setError] = useState<AiError | null>(null);
@@ -133,7 +137,35 @@ export function useSearchAgent(
                 shimmer.replaceWith(resultsFragment);
                 shimmerRef.current = null;
 
-                hydrateSearchResultImages(editorRef.current);
+                // ---------------------------------------------------------
+                // POST-ANALYSIS: Creative Code Generation
+                // ---------------------------------------------------------
+
+                // 1. Find the placeholder we just inserted (if any)
+                //    The renderer puts a <div id="visual-exp-placeholder-...">
+                //    We need to find it in the DOM now.
+                const allPlaceholders = editorRef.current.querySelectorAll('[id^="visual-exp-placeholder-"]');
+                const lastPlaceholder = allPlaceholders[allPlaceholders.length - 1] as HTMLElement;
+
+                if (lastPlaceholder) {
+                    setPhase('generating_code');
+                    // Update the placeholder text if possible, or just let it shimmer
+                    // (The CSS shimmer is already active)
+
+                    // 2. Call the Creative Coding API
+                    // We use the narrative blocks joined together as context + user query
+                    const contextText = narrative.blocks.map(b => b.kind === 'ai' ? b.text : b.prompt).join('\n');
+                    const codeResult = await generateCreativeCoding(contextText, selectedModel, abortControllerRef.current.signal);
+
+                    if (codeResult.ok && codeResult.code) {
+                        // 3. Render the interactive experience
+                        renderVisualExperience(lastPlaceholder, codeResult.code);
+                    } else {
+                        // If failed or empty, just remove the placeholder so it doesn't hang
+                        lastPlaceholder.remove();
+                    }
+                }
+
             } else {
                 // No results - remove shimmer, set error
                 shimmer.remove();
@@ -165,7 +197,7 @@ export function useSearchAgent(
             setPhase('idle');
             abortControllerRef.current = null;
         }
-    }, [editorRef, selectedModel, hydrateSearchResultImages, phase, cancelReview]);
+    }, [editorRef, selectedModel, phase, cancelReview]);
 
     return {
         handleAiReview,

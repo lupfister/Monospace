@@ -193,6 +193,56 @@ ${latestUserText} `;
   );
 };
 
+export const handleCreativeCoding = async (
+  context: string,
+  model?: string | null
+): Promise<{ code: string; description: string }> => {
+  ensureApiKey();
+  const prompt = `You are a Creative Coding Expert. Your goal is to create a unique "Visual Experience" that helps the user DEEPLY UNDERSTAND or EXPLORE the concepts in their text.
+
+  CONTEXT:
+  ${context.slice(0, 8000)}
+
+  INSTRUCTIONS:
+  1. Analyze the context to find the most interesting, complex, or beautiful concept to visualize.
+  2. Create a self-contained HTML fragment (with <style> and <script>) that brings this concept to life.
+  3. BE CREATIVE. You can make a simulation, an interactive diagram, a mini-game, a data visualization, or abstract art that represents the mood.
+  4. Your goal is EDUCATIONAL and EXPERIENTIAL. Help the user "feel" or "play with" the idea.
+
+  TECHNICAL CONSTRAINTS:
+  - USE: HTML5 Canvas, SVG, or DOM animations.
+  - OPTIONAL: You may use "three", "p5", "tone", or "d3" via standard CDNs if it helps.
+  - SIZE: It will be embedded in a container with width: 100% and height: 400px.
+  - RESPONSIVE: Ensure it looks good at that size.
+
+  OUTPUT FORMAT:
+  Return ONLY valid JSON matching this type:
+  {
+    "description": "Short 1-sentence description of what this is",
+    "code": "<!DOCTYPE html><html>...</html>"
+  }
+  
+  The "code" field must contain the FULL HTML string including <!DOCTYPE html>, <html>, <head>, <body>, etc.
+  Do NOT use markdown code fences. Just raw JSON.`;
+
+  const raw = await runBasicAgent(
+    'You are a Creative Code Generator. You output ONLY valid JSON containing the code and description.',
+    prompt,
+    'gpt-5.1-codex-mini'
+  );
+
+  try {
+    const parsed = extractJsonFromOutput(raw) as any;
+    return {
+      code: parsed.code || '<div>Error generating code</div>',
+      description: parsed.description || 'Visual Experience'
+    };
+  } catch (e) {
+    console.error('Failed to parse creative code JSON:', raw);
+    return { code: '<div>Failed to generate visualization</div>', description: 'Error' };
+  }
+};
+
 export const handlePlanSearch = async (
   text: string,
   model?: string | null,

@@ -10,6 +10,7 @@ import {
   handlePlanSearch,
   handleReviewSkeletonNotes,
   handleSummarize,
+  handleCreativeCoding,
   parseAgentSearchRequest,
 } from './ai';
 
@@ -125,6 +126,23 @@ app.post('/api/ai/review', async (req: any, res: any) => {
       ok: false,
       error: { type: errorType, message }
     });
+  }
+});
+
+app.post('/api/ai/creative-coding', async (req: any, res: any) => {
+  const { context, model } = req.body || {};
+
+  if (!context || typeof context !== 'string') {
+    return res.status(400).json({ ok: false, error: 'Missing context' });
+  }
+
+  try {
+    const result = await handleCreativeCoding(context, model);
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Creative coding error:', message);
+    return res.status(500).json({ ok: false, error: message });
   }
 });
 

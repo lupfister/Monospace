@@ -14,12 +14,13 @@ import type { SkeletonNotes, SkeletonNoteBlock, AiError } from './openaiAgentApi
  */
 
 // Loading phase type
-export type LoadingPhase = 'planning' | 'searching' | 'generating';
+export type LoadingPhase = 'planning' | 'searching' | 'generating' | 'generating_code';
 
 const PHASE_MESSAGES: Record<LoadingPhase, string> = {
     planning: 'Understanding your text...',
     searching: 'Exploring sources...',
     generating: 'Crafting response...',
+    generating_code: 'Designing visual experience...'
 };
 
 /**
@@ -121,143 +122,49 @@ export const createErrorBlock = (error: AiError): HTMLDivElement => {
     return container;
 };
 
+// ----------------------------------------------------------------------------
+// CREATIVE CODING / VISUAL EXPERIENCE RENDERERS
+// ----------------------------------------------------------------------------
 
-export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
-    const fragment = document.createDocumentFragment();
-    const isMedia = item.type === 'video' || item.type === 'image';
+/**
+ * Creates a placeholder element for the visual experience.
+ * It uses the same shimmer style but with a specific ID we can target later.
+ */
+export const createVisualExperiencePlaceholder = (): HTMLElement => {
+    // We create a container that looks like a shimmer but has a unique ID
+    const id = `visual-exp-placeholder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    if (item.type === 'image' || item.type === 'video') {
-        const imageUrl = item.thumbnail || item.url || '';
+    // Re-use the shimmer creation logic but customize slightly
+    const container = createLoadingShimmer('generating_code');
+    container.id = id;
+    container.dataset.visualPlaceholder = 'true';
 
-        // 1. Media Line (Image/Video)
-        if (imageUrl) {
-            const mediaPara = document.createElement('p');
-            mediaPara.style.lineHeight = '0'; // Tighter wrapping for media
+    // Add a bit more spacing since it's a major section
+    container.style.marginTop = '24px';
+    container.style.marginBottom = '24px';
 
-            // Wrapper is still useful for relative positioning of play icon
-            const mediaWrapper = document.createElement('span'); // Span to be inline-ish but effective
-            mediaWrapper.contentEditable = 'false'; // IMPORTANT: Unit as a whole
-            mediaWrapper.dataset.aiText = 'true';
-            mediaWrapper.style.display = 'inline-block';
-            mediaWrapper.style.position = 'relative';
-            mediaWrapper.style.overflow = 'hidden';
-            // mediaWrapper.style.borderRadius = '8px'; // Removed rounded corners
-            mediaWrapper.style.maxWidth = '100%';
-            mediaWrapper.style.verticalAlign = 'top'; // Align nicely with text flow if needed
+    return container;
+};
 
-            const img = document.createElement('img');
-            if (isImageUrl(imageUrl)) {
-                img.src = imageUrl;
-            } else {
-                const proxyUrl = `/api/ai/image?url=${encodeURIComponent(imageUrl)}`;
-                img.src = proxyUrl;
-            }
-            if (item.url) img.dataset.fallbackUrl = item.url;
-            img.alt = item.title || (item.type === 'video' ? 'Video thumbnail' : 'Image');
+/**
+ * Mounts the Visual Experience component into the placeholder.
+ * This is called asynchronously after the code has been generated.
+ */
+import { mountVisualExperience } from '../components/VisualExperience';
 
-            // Standardize image styling, but without "card" background
-            img.style.minHeight = '160px'; // Slightly smaller than card
-            img.style.maxHeight = '400px';
-            img.style.width = 'auto'; // allow natural aspect ratio? or 100%?
-            img.style.maxWidth = '100%';
-            img.style.objectFit = 'cover';
-            img.style.backgroundColor = 'var(--color-gray-100, #f3f4f6)';
-            img.loading = 'lazy';
-            img.referrerPolicy = 'no-referrer';
+export const renderVisualExperience = (container: HTMLElement, code: string) => {
+    // Clear the container (remove shimmer)
+    container.innerHTML = '';
 
-            // On error, remove the wrapper (and thus the image)
-            img.onerror = () => {
-                const currentSrc = img.src;
-                if (!currentSrc.includes('/api/ai/image')) {
-                    img.src = `/api/ai/image?url=${encodeURIComponent(imageUrl)}`;
-                    return;
-                }
-                if (mediaWrapper.parentNode) {
-                    mediaWrapper.parentNode.removeChild(mediaWrapper);
-                }
-            };
+    // Remove style that might conflict (width/height)
+    container.removeAttribute('style');
+    // Ensure it's still non-editable wrapper
+    container.contentEditable = 'false';
+    container.dataset.aiText = 'true';
+    container.className = 'visual-experience-wrapper';
 
-            mediaWrapper.appendChild(img);
-
-            // Add video play icon overlay for videos
-            if (item.type === 'video') {
-                const playIcon = document.createElement('div');
-                playIcon.innerHTML = `<svg width="48" height="48" viewBox="0 0 24 24" fill="white" style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));">
-                    <circle cx="12" cy="12" r="10" fill="rgba(0,0,0,0.6)"/>
-                    <path d="M10 8l6 4-6 4V8z" fill="white"/>
-                </svg>`;
-                playIcon.style.position = 'absolute';
-                playIcon.style.top = '50%';
-                playIcon.style.left = '50%';
-                playIcon.style.transform = 'translate(-50%, -50%)';
-                playIcon.style.pointerEvents = 'none';
-                playIcon.style.opacity = '0.9';
-                mediaWrapper.appendChild(playIcon);
-
-                // Click behavior for video
-                mediaWrapper.style.cursor = 'pointer';
-                mediaWrapper.onclick = () => {
-                    if (item.url) window.open(item.url, '_blank', 'noopener,noreferrer');
-                };
-            }
-
-            mediaPara.appendChild(mediaWrapper);
-            fragment.appendChild(mediaPara);
-        }
-
-        // 2. Link/Title Line
-        if (item.title || item.url) {
-            const linkPara = document.createElement('p');
-            linkPara.dataset.aiText = 'true';
-            linkPara.style.lineHeight = '1.5';
-
-            // Use title or domain as label
-            let label = item.title;
-            if (!label && item.url) {
-                try {
-                    label = new URL(item.url).hostname;
-                } catch {
-                    label = 'View source';
-                }
-            }
-            if (!label) label = 'View source';
-
-            if (item.url) {
-                const link = createStyledSourceLink(item.url, label);
-                linkPara.appendChild(link);
-            } else {
-                linkPara.appendChild(createAiTextSpan(label));
-            }
-
-            fragment.appendChild(linkPara);
-        }
-
-        return fragment;
-    }
-
-    if (item.type === 'article') {
-        const container = document.createElement('div'); // Keep article container for now or refactor? 
-        // User asked for "image/video embeds". 
-        // We'll return a fragment containing the div to match return type.
-
-        container.className = resultCardClasses.item; // Keep existing style for articles
-        container.dataset.resultType = item.type;
-        container.dataset.aiText = 'true';
-        if (item.url) container.dataset.url = item.url;
-
-        container.appendChild(createAiTextBlock(item.snippet || item.title));
-        if (item.url) {
-            const articleLabel = item.title || 'Open article';
-            const linkWrapper = document.createElement('div');
-            linkWrapper.appendChild(document.createElement('br'));
-            linkWrapper.appendChild(createStyledSourceLink(item.url, articleLabel));
-            container.appendChild(linkWrapper);
-        }
-        fragment.appendChild(container); // Wrap in fragment
-        return fragment;
-    }
-
-    return fragment;
+    // Mount the React component
+    mountVisualExperience(container, code, 'AI Generated Visualization');
 };
 
 const createSpacer = () => {
@@ -275,19 +182,8 @@ export const buildSearchResultsBlock = async (
 ): Promise<DocumentFragment> => {
     const fragment = document.createDocumentFragment();
 
-    // Fix: Reclassify articles that are actually videos/images
-    const processedItems = items.map((item) => {
-        if (item.type === 'article' && item.url) {
-            const u = item.url.toLowerCase();
-            if (u.includes('youtube.com') || u.includes('youtu.be') || u.includes('vimeo.com') || u.includes('dailymotion.com')) {
-                return { ...item, type: 'video' as const };
-            }
-            if (/\.(jpg|jpeg|png|gif|webp)($|\?)/i.test(u)) {
-                return { ...item, type: 'image' as const };
-            }
-        }
-        return item;
-    });
+    const searchableItems = items.filter((item) => item.type !== 'snippet');
+    const infoItems = searchableItems.filter((item) => item.type === 'article');
 
     // Helper to add safe text block
     const addTextBlock = (content: DocumentFragment | string) => {
@@ -301,79 +197,10 @@ export const buildSearchResultsBlock = async (
         fragment.appendChild(p);
     };
 
-    const searchableItems = processedItems.filter((item) => item.type !== 'snippet');
-    // STRICT FILTER: Only allow images that actually LOOK like images (url or thumbnail has extension).
-    // This prevents "Wikipedia pages" from being rendered as broken images.
-    const mediaItems = searchableItems.filter((item) => {
-        // Common filter: Exclude obvious logos or icons
-        const isLogo = (u: string) => /logo|icon|favicon/i.test(u);
-        if ((item.url && isLogo(item.url)) || (item.thumbnail && isLogo(item.thumbnail))) return false;
-
-        // Videos: Include if we have a URL (we can try to fetch thumb via proxy)
-        if (item.type === 'video') return !!item.url;
-
-        // Images: Include if we have a URL (we can fetch via proxy if it's a page)
-        if (item.type === 'image') return !!item.url;
-
-        return false;
-    })
-        .map((item) => {
-            // Score each media item for quality and interestingness
-            let score = 0;
-
-            // Base score by type (videos often more engaging)
-            if (item.type === 'video') score += 10;
-            if (item.type === 'image') score += 5;
-
-            // Quality indicators in URL or title
-            const text = `${item.url || ''} ${item.title || ''}`.toLowerCase();
-
-            // Positive signals (high-quality sources)
-            if (/wikipedia|wikimedia|nasa|smithsonian|museum|archive|\.edu|\.gov/.test(text)) score += 15;
-            if (/diagram|infographic|visualization|chart|graph|screenshot/.test(text)) score += 12;
-            if (/hd|high.?res|4k|original|full.?size/.test(text)) score += 8;
-            if (/official|documentation|research|scientific|academic/.test(text)) score += 10;
-
-            // Negative signals (low-quality or generic)
-            if (/stock|shutterstock|getty|istockphoto|dreamstime|pixabay|pexels/.test(text)) score -= 20;
-            if (/thumbnail|preview|sample|watermark/.test(text)) score -= 10;
-            if (/logo|icon|favicon|badge/.test(text)) score -= 15;
-            if (/ad|advertisement|promo|marketing/.test(text)) score -= 12;
-            if (/converter|download|tool|app|software/.test(text) && item.type === 'image') score -= 8;
-
-            // Title length (more descriptive = better)
-            if (item.title) {
-                const titleLength = item.title.length;
-                if (titleLength > 40 && titleLength < 120) score += 5;
-                if (titleLength < 20) score -= 3;
-            }
-
-            // Has both thumbnail and URL (more complete data)
-            if (item.thumbnail && item.url) score += 3;
-
-            return { ...item, qualityScore: score };
-        })
-        .sort((a, b) => {
-            // Sort by quality score (highest first)
-            return (b.qualityScore || 0) - (a.qualityScore || 0);
-        });
-    const infoItems = searchableItems.filter((item) => item.type === 'article');
-
-    const bestVideo = mediaItems.find(i => i.type === 'video');
-    const bestImage = mediaItems.find(i => i.type === 'image');
-
-    const limitedMedia = [];
-    if (bestVideo) limitedMedia.push(bestVideo);
-    if (bestImage) limitedMedia.push(bestImage);
-    // const limitedInfo = infoItems.slice(0, 6); // we'll summarize these (unused var)
-
     const hasNotes = notes && notes.blocks.length > 0;
-    if (limitedMedia.length === 0 && infoItems.length === 0 && !hasNotes) {
-        const limitedInfo = infoItems.slice(0, 6);
-        if (limitedMedia.length === 0 && limitedInfo.length === 0 && !hasNotes) {
-            addTextBlock('No results found. Try a different search query.');
-            return fragment;
-        }
+    if (infoItems.length === 0 && !hasNotes) {
+        addTextBlock('No results found. Try a different search query.');
+        return fragment;
     }
 
     // 1. Sources Section (Viewed Sources) - TOP PRIORITY
@@ -448,13 +275,12 @@ export const buildSearchResultsBlock = async (
         fragment.appendChild(createSpacer()); // Valid paragraph spacer
     }
 
-    // 2. Media Section (Images/Videos)
-    if (limitedMedia.length > 0) {
-        limitedMedia.forEach((item) => {
-            const card = createInlineResultCard(item);
-            fragment.appendChild(card);
-            fragment.appendChild(createSpacer());
-        });
+    // 2. Visual Experience Placeholder (Creative Code)
+    // Always insert a placeholder if we have narrative/notes, as we will try to generate one.
+    // If no narrative, we probably won't generate anything.
+    if (hasNotes) {
+        fragment.appendChild(createVisualExperiencePlaceholder());
+        fragment.appendChild(createSpacer());
     }
 
     // 3. Excerpt Section (Quote)

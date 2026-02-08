@@ -116,11 +116,13 @@ export function DocumentEditor() {
         if (shouldShow) {
           caret.style.transform = 'rotate(90deg)';
           content.style.display = 'block';
+          content.classList.remove('ai-ghost-mode');
           content.removeAttribute('data-ai-hidden');
           content.setAttribute('data-ai-revealed', 'true');
         } else {
           caret.style.transform = 'rotate(0deg)';
           content.style.display = 'none';
+          content.classList.add('ai-ghost-mode');
           content.setAttribute('data-ai-hidden', 'true');
           content.removeAttribute('data-ai-revealed');
         }
@@ -183,23 +185,19 @@ export function DocumentEditor() {
             const isExpanded = caret.style.transform.includes('90deg');
             group.forEach((n: HTMLElement, i: number) => {
               if (isExpanded) {
-                // Collapse: Hide content but keep first node as a vertical placeholder
+                // Collapse: Hide content but keep first node as a ghost placeholder
                 n.setAttribute('data-ai-hidden', 'true');
                 n.removeAttribute('data-ai-revealed');
                 if (i === 0) {
                   n.style.display = 'block';
-                  n.style.height = '1.5em';
-                  n.style.overflow = 'hidden';
-                  n.style.visibility = 'hidden';
+                  n.classList.add('ai-ghost-mode');
                 } else {
                   n.style.display = 'none';
                 }
               } else {
                 // Expand: Show all content
                 n.style.display = '';
-                n.style.height = '';
-                n.style.overflow = '';
-                n.style.visibility = '';
+                n.classList.remove('ai-ghost-mode');
                 n.removeAttribute('data-ai-hidden');
                 n.setAttribute('data-ai-revealed', 'true');
               }
@@ -219,18 +217,14 @@ export function DocumentEditor() {
           group.forEach((n: HTMLElement, i: number) => {
             if (isGroupRevealed) {
               n.style.display = '';
-              n.style.height = '';
-              n.style.overflow = '';
-              n.style.visibility = '';
+              n.classList.remove('ai-ghost-mode');
               n.removeAttribute('data-ai-hidden');
             } else {
               // Initial hidden state: Keep first node as a line placeholder
               n.setAttribute('data-ai-hidden', 'true');
               if (i === 0) {
                 n.style.display = 'block';
-                n.style.height = '1.5em';
-                n.style.overflow = 'hidden';
-                n.style.visibility = 'hidden';
+                n.classList.add('ai-ghost-mode');
               } else {
                 n.style.display = 'none';
               }

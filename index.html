@@ -152,6 +152,33 @@
         user-select: none;
         pointer-events: none;
       }
+
+      /* Ghost Text Strategy Styles */
+      [data-ai-hidden="true"].ai-ghost-mode {
+        display: block !important;
+        height: 1.5em !important;
+        overflow: hidden !important;
+        position: relative;
+        color: transparent !important;
+        user-select: none;
+        pointer-events: none;
+      }
+
+      [data-ai-hidden="true"].ai-ghost-mode::after {
+        content: "AI Generated Content • Click to reveal";
+        position: absolute;
+        left: 0;
+        top: 0;
+        color: #717182; /* muted-foreground */
+        font-size: 13px;
+        font-style: italic;
+        opacity: 0.6;
+        white-space: nowrap;
+      }
+
+      [data-ai-hidden="true"].ai-ghost-mode * {
+        display: none !important;
+      }
     </style>
 
 <body>

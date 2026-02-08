@@ -115,12 +115,12 @@ export function DocumentEditor() {
 
         if (shouldShow) {
           caret.style.transform = 'rotate(90deg)';
-          content.style.display = 'block';
+          content.classList.add('ai-xray-mode');
           content.removeAttribute('data-ai-hidden');
           content.setAttribute('data-ai-revealed', 'true');
         } else {
           caret.style.transform = 'rotate(0deg)';
-          content.style.display = 'none';
+          content.classList.add('ai-xray-mode');
           content.setAttribute('data-ai-hidden', 'true');
           content.removeAttribute('data-ai-revealed');
         }
@@ -181,25 +181,14 @@ export function DocumentEditor() {
 
           const shutter = createInteractionCaret((_e: MouseEvent, caret: HTMLElement) => {
             const isExpanded = caret.style.transform.includes('90deg');
-            group.forEach((n: HTMLElement, i: number) => {
+            group.forEach((n: HTMLElement) => {
+              n.classList.add('ai-xray-mode');
               if (isExpanded) {
-                // Collapse: Hide content but keep first node as a vertical placeholder
+                // Collapse: Apply X-ray hiding
                 n.setAttribute('data-ai-hidden', 'true');
                 n.removeAttribute('data-ai-revealed');
-                if (i === 0) {
-                  n.style.display = 'block';
-                  n.style.height = '1.5em';
-                  n.style.overflow = 'hidden';
-                  n.style.visibility = 'hidden';
-                } else {
-                  n.style.display = 'none';
-                }
               } else {
-                // Expand: Show all content
-                n.style.display = '';
-                n.style.height = '';
-                n.style.overflow = '';
-                n.style.visibility = '';
+                // Expand: Full visibility
                 n.removeAttribute('data-ai-hidden');
                 n.setAttribute('data-ai-revealed', 'true');
               }
@@ -216,24 +205,14 @@ export function DocumentEditor() {
           shutter.setAttribute('contenteditable', 'false');
 
           editor.insertBefore(shutter, group[0]);
-          group.forEach((n: HTMLElement, i: number) => {
+          group.forEach((n: HTMLElement) => {
+            n.classList.add('ai-xray-mode');
             if (isGroupRevealed) {
-              n.style.display = '';
-              n.style.height = '';
-              n.style.overflow = '';
-              n.style.visibility = '';
               n.removeAttribute('data-ai-hidden');
+              n.setAttribute('data-ai-revealed', 'true');
             } else {
-              // Initial hidden state: Keep first node as a line placeholder
               n.setAttribute('data-ai-hidden', 'true');
-              if (i === 0) {
-                n.style.display = 'block';
-                n.style.height = '1.5em';
-                n.style.overflow = 'hidden';
-                n.style.visibility = 'hidden';
-              } else {
-                n.style.display = 'none';
-              }
+              n.removeAttribute('data-ai-revealed');
             }
           });
         });

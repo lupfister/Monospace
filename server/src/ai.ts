@@ -19,7 +19,7 @@ const SEARCH_PLAN_SCHEMA = z.object({
   queries: z
     .array(
       z.object({
-        type: (z.enum as any)(['video', 'image', 'web']),
+        type: (z.enum as any)(['web']),
         query: z.string().min(1),
         reason: z.string().optional(),
       }),
@@ -139,40 +139,37 @@ export const handleReviewSkeletonNotes = async (
   const conversationHistory = context.length > 0 ? formatContext(context) : `[HUMAN]: ${text}`;
   const latestUserText = context.length > 0 ? getLastHumanText(context) : text;
 
-  const prompt = `You are writing "skeleton notes" for a document editor. The app will display content in this order: (1) images and video embeds (inserted by the app from search), (2) your information section, (3) your questions.
+  const prompt = `You are writing "skeleton notes" for a document editor. The app will display content in this order: (1) Viewed Sources, (2) Text quote excerpts from sources, (3) your questions.
   
 You are receiving a CONVERSATION HISTORY between a Human and AI.
 Your goal is to RESPOND to the LATEST Human input, while respecting the context of the previous turn.
 
 Output MUST be valid JSON only (no markdown, no code fences, no commentary) matching this TypeScript type:
 type Block =
-  | { kind: "ai"; text: string }
+  | { kind: "ai"; text: string } // DEPRECATED: Do NOT use this block. The app handles content display via quotes.
   | { kind: "input"; prompt: string; lines: number };
 type Output = { blocks: Block[] };
 
 Output order (strict):
-1. Information section first: exactly ONE "ai" block with a single paragraph (2–4 sentences max). Prioritize novel information and "serendipitous" finds. Connect the user's input to broader concepts, historical echoes, or unexpected technical parallels.
-2. Questions last: 1–3 "input" blocks. Only ask questions that are truly thought-provoking and add significant value. If only one question is worth asking, output only one. Do NOT force 3 questions. These questions must NOT feel like a quiz. They should feel like a late-night conversation with a polymath. 
-   - Each question should probe the user's personal intuition, a philosophical implication, or a cross-disciplinary connection (e.g., "How does this biological pattern remind you of how you organize your own digital life?").
-   - Avoid "What," "How," or "Why" questions that can be answered by the provided text.
-   - Seek "lateral" questions: if the topic is physics, ask about architecture; if the topic is history, ask about future psychology.
+1. Questions: 1–3 "input" blocks. 
+   - Base your questions primarily on the *content* of the search results (which will be displayed as quotes to the user).
+   - If the search results focus on a single clear fact/concept, ask questions about that specific detail.
+   - If the results are diverse or contradictory, ask about the collective implications or the tension between them.
+   - Questions should be thought-provoking but directly relevant to the material found.
    - Use "input" blocks: prompt is shown in gray; then render exactly "lines" empty user lines to fill in (use 2–4 for depth).
 
 Rules:
-- Do NOT output any text that says "Video link:", "Image link:", or raw URLs. The app inserts media blocks above your response.
-- Do NOT add a "Summary" section unless the user's text explicitly asks for one.
-- Do NOT output more than ONE "ai" block total.
-- Do NOT include any markdown links (e.g. [text](url)) in the output text. This is a strict rule.
-- Do NOT reference external articles or "read more" links in your text. Provide the information directly.
-- If the user's text asks a question, answer it in the information section (as an "ai" block) and still end with these serendipitous questions.
-- Keep total blocks <= 12.
+- Do NOT output any "ai" blocks (information sections).
+- Do NOT output any text that says "Video link:", "Image link:", or raw URLs.
+- Do NOT add a "Summary" section.
+- Do NOT include any markdown links (e.g. [text](url)) in the output text.
+- If the user's text asks a question, assume the search results (quotes) provide the answer. Ask a follow-up question that bridges that answer to the user's broader intent.
+- Keep total blocks <= 5 (just the questions).
 
-After the JSON, if you think web search results would be helpful, append ONE tag on a new line (outside JSON):
-- [SEARCH_VIDEOS: query]
+After the JSON, if you think further web search results would be helpful (unlikely since we just searched), append ONE tag on a new line (outside JSON):
 - [SEARCH_ARTICLES: query]
-- [SEARCH_IMAGES: query]
 - [SEARCH_ALL: query]
-Only add a tag if external content would genuinely add value.`;
+Only add a tag if deeper research is needed.`;
 
   const finalPrompt = `${prompt}
 
@@ -205,19 +202,17 @@ export const handlePlanSearch = async (
   const conversationHistory = context.length > 0 ? formatContext(context) : `[HUMAN]: ${text}`;
   const latestUserText = context.length > 0 ? getLastHumanText(context) : text;
 
-  const prompt = `You are an Expert Search Strategist. Your goal is to maximize "serendipity"—finding content that connects the user's text to unexpected fields, history, or future possibilities. Avoid the obvious.
+  const prompt = `You are an Expert Search Strategist. Your goal is to find content that connects the user's text to unexpected fields, history, or future possibilities. Avoid the obvious.
 
 Analyze the user's text and craft strategic queries. Use as few queries as needed to get high-quality results (typically 2-5).
 
 Return ONLY valid JSON:
 type Plan = {
   shouldSearch: boolean;
-  queries: Array<{ type: "web" | "image" | "video"; query: string; reason?: string }>;
+  queries: Array<{ type: "web"; query: string; reason?: string }>;
 };
 
 GOALS BY TYPE:
-• IMAGE: Find diagrams, technical illustrations, data visualizations, or vivid high-quality photos. Look for visual clarity that helps "see" the concept.
-• VIDEO: Find expert demonstrations, lectures, educational documentaries, or technical deep-dives. Look for authoritative sources.
 • WEB (Article): Find primary sources, surprising research findings, or in-depth analysis from reputable institutions. Look for content that provides substantive context and "rabbit holes" to explore.
 
 Text to analyze:
@@ -429,6 +424,53 @@ Return ONLY the required JSON structure (no extra text). Output must be valid JS
     console.error(`[SearchAgent] run failed for "${query.query}":`, err);
     throw err;
   }
+};
+
+export const handleExploreSource = async (
+  url: string,
+  model?: string | null,
+  previousContext?: string,
+): Promise<string> => {
+  ensureApiKey();
+  const modelToUse = getModelForSearch(model);
+
+  const agent = new Agent({
+    name: 'SourceExplorer',
+    instructions:
+      'You are a researcher providing deep, surprising, or highly specific facts from a source. ' +
+      'STRICT: State the fact DIRECTLY. Do NOT attribute it (no "The authors show...", "The study says...", "According to the article..."). ' +
+      'BAD: "The study demonstrates that cats sleep 18 hours." ' +
+      'GOOD: "Cats sleep 18 hours a day, utilizing a unique REM cycle." ' +
+      'STRICT: Provide ONLY a direct, interesting technical or historical fact found within or about the source. ' +
+      'STRICT: If previous context is provided, you MUST find a completely different, new, and deeper detail. ' +
+      'MAX LENGTH: 45 words. 2 sentences maximum. ' +
+      'STRICT NO LINKS: Never include URLs, markdown links, or domain names. ' +
+      'Output ONLY the fact text. No preamble.',
+    tools: [webSearchTool()],
+    model: modelToUse,
+  });
+
+  const prompt = `Source: ${url}
+${previousContext ? `KNOWN INFO: "${previousContext}". TASK: Find a NEW, deeper, and unrelated surprising fact about this source. State it directly without "The study says".` : 'TASK: Find one surprising or deeply specific technical/historical fact from this source (2 sentences). State it directly without "The study says".'}
+Output ONLY the fact text.`;
+
+  const result = await run(agent, prompt);
+  let output = typeof result === 'string' ? result : String((result as any).finalOutput ?? '').trim();
+
+  // POST-PROCESS: Aggressively strip any links/URLs that slipped through
+  output = output
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Clean [label](url) -> label
+    .replace(/https?:\/\/[^\s]+/g, '')        // Remove raw URLs
+    .replace(/\s+/g, ' ')                      // Normalize spaces
+    .trim();
+
+  // Cap length by sentences if still too long
+  const sentences = output.split(/[.!?]+\s/).filter(s => s.length > 5);
+  if (sentences.length > 2) {
+    output = sentences.slice(0, 2).join('. ') + '.';
+  }
+
+  return output;
 };
 
 export const handleAgentSearch = async (

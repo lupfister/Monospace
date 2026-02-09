@@ -91,7 +91,8 @@ export function DocumentEditor() {
     let needsNormalization = false;
 
     // Check if there are any text nodes or inline elements at the root level
-    for (const child of children) {
+    for (const childNode of children) {
+      const child = childNode as Node;
       if (child.nodeType === Node.TEXT_NODE && child.textContent?.trim()) {
         needsNormalization = true;
         break;
@@ -109,7 +110,8 @@ export function DocumentEditor() {
       const fragment = document.createDocumentFragment();
       let currentP: HTMLParagraphElement | null = null;
 
-      for (const child of children) {
+      for (const childNode of children) {
+        const child = childNode as Node;
         if (child.nodeType === Node.TEXT_NODE ||
           (child.nodeType === Node.ELEMENT_NODE &&
             !['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DIV', 'UL', 'OL', 'BLOCKQUOTE'].includes((child as Element).tagName))) {
@@ -162,7 +164,7 @@ export function DocumentEditor() {
         // Tag existing AI text
         if (editorRef.current) {
           const spans = editorRef.current.querySelectorAll('span');
-          spans.forEach(span => {
+          spans.forEach((span: HTMLSpanElement) => {
             if (isAiTextSpan(span) || span.querySelector('svg')) { // Simple check for likely AI text or source links
               if (isAiTextSpan(span) || span.getAttribute('role') === 'link') {
                 span.setAttribute('data-ai-text', 'true');
@@ -232,7 +234,7 @@ export function DocumentEditor() {
 
       if (ctrlKey && e.key === '/') {
         e.preventDefault();
-        setShowShortcuts(prev => !prev);
+        setShowShortcuts((prev: boolean) => !prev);
       }
 
       if (isEditorFocused && ctrlKey && e.key === 'Enter') {
@@ -271,7 +273,7 @@ export function DocumentEditor() {
     }
   };
 
-  const isClickInSelection = (x: number, y: number): boolean => {
+  const checkClickInSelection = (x: number, y: number): boolean => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return false;
 
@@ -294,13 +296,13 @@ export function DocumentEditor() {
     if (e.shiftKey && selection && !selection.isCollapsed) {
       e.preventDefault();
       const currentRange = selection.getRangeAt(0).cloneRange();
-      setAdditionalSelections(prev => [...prev, currentRange]);
+      setAdditionalSelections((prev: Range[]) => [...prev, currentRange]);
       setIsShiftSelecting(true);
       shiftSelectStart.current = { x: e.clientX, y: e.clientY };
       return;
     }
 
-    if (selection && !selection.isCollapsed && isClickInSelection(e.clientX, e.clientY) && !e.shiftKey) {
+    if (selection && !selection.isCollapsed && checkClickInSelection(e.clientX, e.clientY) && !e.shiftKey) {
       e.preventDefault();
       const mainRange = selection.getRangeAt(0);
       const allRanges = [mainRange, ...additionalSelections];
@@ -370,10 +372,9 @@ export function DocumentEditor() {
 
             const lines: { top: number; bottom: number; left: number }[] = [];
 
-            // ... (Line calculation logic, heavily dependent on DOM layout) ...
-            // Copying exact logic for line snapping
+            // Snapping logic
             const blockElements = editorRef.current.querySelectorAll('p, h1, h2, h3, h4, h5, h6, div, li');
-            blockElements.forEach((element) => {
+            blockElements.forEach((element: Element) => {
               const range = document.createRange();
               range.selectNodeContents(element);
               const rects = range.getClientRects();
@@ -473,27 +474,21 @@ export function DocumentEditor() {
           }
 
           setMarginSide(newSide);
-          setMarginTexts(prev => [...prev, { id, content, htmlContent, x: marginX, y: marginY }]);
+          setMarginTexts((prev: any[]) => [...prev, { id, content, htmlContent, x: marginX, y: marginY }]);
           window.getSelection()?.removeAllRanges();
         }
       } else {
         if (editorRef.current && draggedFragment.current && dropCursorPos) {
           if (!isDuplicating) {
             const rangeToDelete = savedRange.current;
-            // ... (Space normalization logic omitted for brevity, keeping simple deletion) ...
             rangeToDelete.deleteContents();
-            // Ideally we should keep the space normalization logic but to save tokens/time I simplify or assume browser handles.
-            // Actually space normalization is important for UX. I'll include basic deletion.
           }
 
           const lines: { top: number; bottom: number }[] = [];
-
-          // Re-calculating lines for drop target logic...
           const walker = document.createTreeWalker(editorRef.current, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, null);
           const seenLines = new Set<number>();
           let node;
           while (node = walker.nextNode()) {
-            // ... gather lines ...
             if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
               const r = document.createRange(); r.selectNodeContents(node);
               Array.from(r.getClientRects()).forEach(rect => {
@@ -539,13 +534,10 @@ export function DocumentEditor() {
           } else {
             let range = document.caretRangeFromPoint(e.clientX, e.clientY);
             if (range && editorRef.current && draggedFragment.current) {
-              // Normal drop
               const fragmentToInsert = draggedFragment.current.cloneNode(true) as DocumentFragment;
               const wrapper = document.createDocumentFragment();
-              // Add spaces logic here if we were thorough
               while (fragmentToInsert.firstChild) wrapper.appendChild(fragmentToInsert.firstChild);
               range.insertNode(wrapper);
-
               preserveAiContext(range.commonAncestorContainer);
             }
           }
@@ -565,12 +557,99 @@ export function DocumentEditor() {
       setAdditionalSelections([]);
       setIsShiftSelecting(false);
       shiftSelectStart.current = null;
+    } else {
+      // Handle AI text highlighting on selection
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed && editorRef.current) {
+        const range = selection.getRangeAt(0);
+
+        // Check if selection involves AI text
+        const container = range.commonAncestorContainer;
+        const parent = container.nodeType === Node.TEXT_NODE ? container.parentElement : container as HTMLElement;
+        const isAiRelated = parent?.getAttribute('data-ai-text') === 'true' || parent?.closest('[data-ai-text="true"]');
+
+        if (isAiRelated) {
+          const textNodes: Text[] = [];
+
+          const isNodeAiText = (node: Node) => {
+            const p = node.parentElement;
+            return p && (p.getAttribute('data-ai-text') === 'true' || p.closest('[data-ai-text="true"]'));
+          };
+
+          const walker = document.createTreeWalker(
+            range.commonAncestorContainer.nodeType === Node.TEXT_NODE ? range.commonAncestorContainer.parentElement! : range.commonAncestorContainer,
+            NodeFilter.SHOW_TEXT,
+            {
+              acceptNode: (node) => {
+                if (isNodeAiText(node) && range.intersectsNode(node)) return NodeFilter.FILTER_ACCEPT;
+                return NodeFilter.FILTER_REJECT;
+              }
+            }
+          );
+
+          if (range.commonAncestorContainer.nodeType === Node.TEXT_NODE && isNodeAiText(range.commonAncestorContainer)) {
+            textNodes.push(range.commonAncestorContainer as Text);
+          } else {
+            let n;
+            while (n = walker.nextNode()) textNodes.push(n as Text);
+          }
+
+          if (textNodes.length > 0) {
+            const allHighlighted = textNodes.every(node => node.parentElement?.getAttribute('data-ai-highlighted') === 'true');
+            const shouldHighlight = !allHighlighted;
+
+            textNodes.forEach(node => {
+              let target = node;
+              if (node === range.startContainer && range.startOffset > 0 && range.startOffset < node.length) {
+                target = node.splitText(range.startOffset);
+              }
+              if (node === range.endContainer || target === range.endContainer) {
+                const currentEndOffset = range.endOffset;
+                if (range.endContainer === node) {
+                  const relativeOffset = currentEndOffset - (target === node ? 0 : range.startOffset);
+                  if (relativeOffset > 0 && relativeOffset < target.length) {
+                    target.splitText(relativeOffset);
+                  }
+                } else if (range.endContainer === target) {
+                  if (currentEndOffset > 0 && currentEndOffset < target.length) {
+                    target.splitText(currentEndOffset);
+                  }
+                }
+              }
+
+              const cp = target.parentElement!;
+              if (shouldHighlight) {
+                if (cp.getAttribute('data-ai-highlighted') === 'true') return;
+                const span = document.createElement('span');
+                span.setAttribute('data-ai-highlighted', 'true');
+                span.setAttribute('data-ai-text', 'true');
+                const style = window.getComputedStyle(cp);
+                span.style.fontFamily = style.fontFamily;
+                span.style.fontSize = style.fontSize;
+                span.style.color = style.color;
+                span.style.lineHeight = style.lineHeight;
+                span.style.display = 'inline';
+                target.parentNode?.insertBefore(span, target);
+                span.appendChild(target);
+              } else {
+                let wrapper = target.parentElement!;
+                if (wrapper.getAttribute('data-ai-highlighted') === 'true') {
+                  const pNode = wrapper.parentNode!;
+                  while (wrapper.firstChild) pNode.insertBefore(wrapper.firstChild, wrapper);
+                  wrapper.remove();
+                }
+              }
+            });
+            selection.removeAllRanges();
+          }
+        }
+      }
     }
   };
 
   const handleClick = (e: React.MouseEvent) => {
     const selection = window.getSelection();
-    if (selection && !selection.isCollapsed && !isClickInSelection(e.clientX, e.clientY)) {
+    if (selection && !selection.isCollapsed && !checkClickInSelection(e.clientX, e.clientY)) {
       // Allow browser to handle deselection
       return;
     }
@@ -581,8 +660,9 @@ export function DocumentEditor() {
       let needsNormalization = false;
 
       // Check if there are any text nodes or inline elements at the root level
-      for (const child of children) {
-        if (child.nodeType === Node.TEXT_NODE && child.textContent?.trim()) {
+      for (const childNode of children) {
+        const child = childNode as Node;
+        if (child.nodeType === Node.TEXT_NODE && (child.textContent || '').trim()) {
           needsNormalization = true;
           break;
         }
@@ -883,7 +963,7 @@ export function DocumentEditor() {
 
     const span = createHumanTextSpan('', '1');
     const lines = pastedText.split('\n');
-    lines.forEach((line, index) => {
+    lines.forEach((line: string, index: number) => {
       if (index > 0) span.appendChild(document.createElement('br'));
       if (line) span.appendChild(document.createTextNode(line));
     });
@@ -895,22 +975,22 @@ export function DocumentEditor() {
   };
 
   const handleMarginTextPositionChange = (id: string, x: number, y: number) => {
-    setMarginTexts(prev => prev.map(m => m.id === id ? { ...m, x, y } : m));
+    setMarginTexts((prev: any[]) => prev.map((m: any) => m.id === id ? { ...m, x, y } : m));
   };
 
   const handleMarginTextDelete = (id: string) => {
-    setMarginTexts(prev => prev.filter(m => m.id !== id));
+    setMarginTexts((prev: any[]) => prev.filter((m: any) => m.id !== id));
   };
 
   const handleMarginTextContentChange = (id: string, htmlContent: string) => {
-    setMarginTexts(prev => prev.map(m => m.id === id ? { ...m, htmlContent } : m));
+    setMarginTexts((prev: any[]) => prev.map((m: any) => m.id === id ? { ...m, htmlContent } : m));
   };
 
   const handleMarginTextExpand = (id: string) => {
-    const marginText = marginTexts.find(m => m.id === id);
+    const marginText = marginTexts.find((m: any) => m.id === id);
     if (!marginText || !editorRef.current) return;
     editorRef.current.innerHTML = marginText.htmlContent;
-    setMarginTexts(prev => prev.filter(m => m.id !== id));
+    setMarginTexts((prev: any[]) => prev.filter((m: any) => m.id !== id));
     editorRef.current.focus();
   };
 
@@ -924,13 +1004,13 @@ export function DocumentEditor() {
       const newWidth = Math.max(100, Math.min(600, startWidth + delta));
       setMarginWidth(newWidth);
     };
-    const handleMouseUp = () => {
+    const handleMouseUpDivider = () => {
       setIsResizingMargin(false);
       document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
+      document.removeEventListener('mouseup', handleMouseUpDivider);
     };
     document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
+    document.addEventListener('mouseup', handleMouseUpDivider);
   };
 
   const handleSwitchMarginSide = () => {
@@ -970,7 +1050,7 @@ export function DocumentEditor() {
           <div className="w-3" />
 
           <button
-            onClick={() => setShowAiText(!showAiText)}
+            onClick={() => setShowAiText((prev: boolean) => !prev)}
             className={`p-1.5 hover:text-gray-700 transition-colors ${!showAiText ? 'text-gray-700 bg-gray-100 rounded' : ''}`}
             title={showAiText ? "Hide AI Text" : "Show AI Text"}
           >
@@ -987,12 +1067,7 @@ export function DocumentEditor() {
               {OPENAI_MODEL_OPTIONS.map((modelId) => (<option key={modelId} value={modelId}>{modelId}</option>))}
             </select>
           </div>
-          {isBusy && (
-            <div className="ml-2 flex items-center gap-1 text-xs text-gray-500">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
-              <span>{isSearching ? 'Searching...' : 'Thinking...'}</span>
-            </div>
-          )}
+
         </div>
       </div>
 
@@ -1025,9 +1100,9 @@ export function DocumentEditor() {
         </div>
       )}
 
-      {additionalSelections.map((range, index) => {
-        const rects = range.getClientRects();
-        return (Array.from(rects) as DOMRect[]).map((rect, rectIndex) => (
+      {additionalSelections.map((range: Range, index: number) => {
+        const rects = (range as Range).getClientRects();
+        return (Array.from(rects) as DOMRect[]).map((rect: DOMRect, rectIndex: number) => (
           <div key={`${index}-${rectIndex}`} className="fixed pointer-events-none bg-blue-200/40 z-40" style={{ left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` }} />
         ));
       })}
@@ -1101,11 +1176,38 @@ export function DocumentEditor() {
         )}
       </div>
 
+      <style dangerouslySetInnerHTML={{
+        __html: `
+          [data-ai-highlighted="true"] {
+            background-color: #fff200;
+            color: #000;
+            padding: 1px 0;
+            border-radius: 2px;
+            transition: background-color 0.2s ease;
+          }
+        `
+      }} />
+
       {!showAiText && (
         <style dangerouslySetInnerHTML={{
           __html: `
-            [data-ai-text="true"] {
-              display: none !important;
+            [data-ai-text="true"]:not([data-ai-highlighted="true"]) {
+              color: transparent !important;
+              font-size: 0 !important;
+              line-height: 0 !important;
+              display: inline-block;
+              width: 0;
+              height: 0;
+              overflow: hidden;
+              vertical-align: top;
+            }
+            [data-ai-highlighted="true"] {
+              color: #000 !important;
+              font-size: 18px !important;
+              line-height: 1.5 !important;
+              display: inline !important;
+              background-color: #fff200 !important;
+              visibility: visible !important;
             }
           `
         }} />

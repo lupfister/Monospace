@@ -2,7 +2,7 @@ import { resultCardClasses, type ResultItem } from './searchResultItems';
 import { isImageUrl } from './linkPreviews';
 import { createAiTextBlock } from './domUtils';
 import { createAiTextWithLinksFragment, createAiTextSpan, createStyledSourceLink } from './textStyles';
-import type { SkeletonNotes, SkeletonNoteBlock, AiError } from './openaiAgentApi';
+import { SkeletonNotes, SkeletonNoteBlock, AiError, exploreSource } from './openaiAgentApi';
 
 
 /**
@@ -34,47 +34,38 @@ export const createLoadingShimmer = (phase: LoadingPhase = 'planning'): HTMLDivE
     container.contentEditable = 'false';
     container.style.cssText = `
     display: block;
-    margin: 16px 0;
-    padding: 12px 0;
     user-select: none;
     pointer-events: none;
   `;
 
-    // Phase message
+    // Add empty line gap above
+    const spacer = document.createElement('div');
+    spacer.style.height = '1.5em'; // Standard line height
+    container.appendChild(spacer);
+
+    // Phase message with shimmer effect
     const phaseText = document.createElement('div');
     phaseText.className = 'shimmer-phase-text';
     phaseText.textContent = PHASE_MESSAGES[phase];
     phaseText.style.cssText = `
-    color: #6e6e6e;
     font-size: 13px;
     margin-bottom: 12px;
     font-style: italic;
     line-height: 1.5;
+    background: linear-gradient(
+      90deg,
+      #6e6e6e 0%,
+      #b0b0b0 50%,
+      #6e6e6e 100%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer 2s infinite linear;
+    width: fit-content;
   `;
     container.appendChild(phaseText);
-
-    // Shimmer lines (3 horizontal bars with random widths)
-    for (let i = 0; i < 3; i++) {
-        const line = document.createElement('div');
-        line.className = 'shimmer-line';
-        const width = 60 + Math.random() * 35; // 60-95% width for variety
-        line.style.cssText = `
-      height: 14px;
-      width: ${width}%;
-      background: linear-gradient(
-        90deg,
-        #f0f0f0 0%,
-        #e0e0e0 20%,
-        #f0f0f0 40%,
-        #f0f0f0 100%
-      );
-      background-size: 200% 100%;
-      animation: shimmer 1.5s infinite;
-      border-radius: 4px;
-      margin-bottom: 8px;
-    `;
-        container.appendChild(line);
-    }
 
     return container;
 };
@@ -103,7 +94,6 @@ export const createErrorBlock = (error: AiError): HTMLDivElement => {
     background: #fef2f2;
     border-left: 3px solid #ef4444;
     border-radius: 4px;
-    margin: 16px 0;
   `;
 
     const message = document.createElement('div');
@@ -117,6 +107,142 @@ export const createErrorBlock = (error: AiError): HTMLDivElement => {
         suggestion.textContent = error.suggestion;
         container.appendChild(suggestion);
     }
+
+    return container;
+};
+
+/**
+ * Creates an interactive source item with a "Learn more" button integrated within the link.
+ */
+const createInteractiveSourceItem = (url: string, label: string, initialContext: string = ''): HTMLDivElement => {
+    const container = document.createElement('div');
+    // container.style.marginBottom = '8px'; // Removed spacer gap
+
+    // Container for AI summary (inserted above link)
+    const summaryContainer = document.createElement('div');
+    summaryContainer.style.display = 'none';
+    // summaryContainer.style.marginBottom = '6px'; // Removed spacer gap
+    // Use standard AI text styling (Inter, gray)
+    summaryContainer.style.fontFamily = 'Inter, sans-serif';
+    summaryContainer.style.fontSize = '14px';
+    summaryContainer.style.color = '#6e6e6e';
+    summaryContainer.style.lineHeight = '1.5';
+    container.appendChild(summaryContainer);
+
+    // 1. Source Link (The wrapper)
+    const linkComponent = createStyledSourceLink(url, label);
+
+    // 2. Learn More Button (Appended INSIDE the link component)
+    const learnMoreBtn = document.createElement('span');
+    learnMoreBtn.textContent = 'Learn more';
+    learnMoreBtn.style.fontSize = '11px'; // Slightly smaller
+    learnMoreBtn.style.color = '#9ca3af'; // Gray text
+    learnMoreBtn.style.cursor = 'pointer';
+    learnMoreBtn.style.marginLeft = '8px';
+    learnMoreBtn.style.paddingLeft = '8px';
+    learnMoreBtn.style.borderLeft = '1px solid #e5e7eb';
+    learnMoreBtn.style.whiteSpace = 'nowrap';
+    learnMoreBtn.style.transition = 'color 0.2s';
+
+    // Hover effect for the button
+    learnMoreBtn.onmouseenter = () => {
+        if (!learnMoreBtn.dataset.loading) learnMoreBtn.style.color = '#4b5563';
+    };
+    learnMoreBtn.onmouseleave = () => {
+        if (!learnMoreBtn.dataset.loading) learnMoreBtn.style.color = '#9ca3af';
+    };
+
+    learnMoreBtn.onclick = async (e) => {
+        e.stopPropagation(); // Prevent opening the link
+        e.preventDefault();
+
+        // Prevent multiple clicks
+        if (learnMoreBtn.dataset.loading === 'true') return;
+
+        // Visual state: Loading
+        learnMoreBtn.dataset.loading = 'true';
+        learnMoreBtn.textContent = 'Learning...';
+        learnMoreBtn.style.cursor = 'wait';
+
+        // Show shimmer in summary container
+        summaryContainer.style.display = 'block';
+
+        // Remove any previous error message before adding shimmer
+        const prevError = summaryContainer.querySelector('.ai-error-inline');
+        if (prevError) prevError.remove();
+
+        const shimmer = createLoadingShimmer('searching');
+        shimmer.style.margin = '0';
+        shimmer.style.padding = '0 0 8px 0';
+        summaryContainer.appendChild(shimmer);
+
+        try {
+            // Collect existing text to pass as context
+            // Combine initial context (quote) and any already generated summary text
+            const currentSummary = summaryContainer.innerText.trim();
+            const fullContext = [initialContext, currentSummary].filter(Boolean).join(' '); // Join with space
+
+            const result = await exploreSource(url, null, fullContext);
+
+            // Remove previous error/shimmer before adding new result
+            const lastChild = summaryContainer.lastChild;
+            if (lastChild && (lastChild as HTMLElement).className === 'ai-error-inline') {
+                lastChild.remove();
+            }
+            shimmer.remove();
+
+            if (result.ok && result.text) {
+                // Success: Append a new paragraph with the result text
+                const p = document.createElement('p');
+                p.style.margin = '0'; // Strict: No margin
+
+                // Final safety cleanup of any stray markdown links or raw URLs
+                const cleanText = result.text
+                    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+                    .replace(/https?:\/\/[^\s]+/g, '');
+
+                // User requested empty line above appended text. 
+                // Always add a gap above relative to preceding content.
+                summaryContainer.appendChild(createSpacer());
+
+                p.appendChild(createAiTextSpan(cleanText));
+                summaryContainer.appendChild(p);
+
+                // Ensure button resets but stays visible
+                learnMoreBtn.dataset.loading = 'false';
+                learnMoreBtn.textContent = 'Learn more';
+                learnMoreBtn.style.cursor = 'pointer';
+            } else {
+                // Error (stay in summary container but use an inline error style)
+                const errDiv = document.createElement('div');
+                errDiv.className = 'ai-error-inline';
+                errDiv.style.color = '#ef4444';
+                errDiv.style.fontSize = '12px';
+                errDiv.textContent = result.error || 'Could not load info.';
+                summaryContainer.appendChild(errDiv);
+
+                // Reset button
+                learnMoreBtn.textContent = 'Retry';
+                learnMoreBtn.dataset.loading = 'false';
+                learnMoreBtn.style.cursor = 'pointer';
+            }
+        } catch (err) {
+            shimmer.remove();
+            const errDiv = document.createElement('div');
+            errDiv.className = 'ai-error-inline';
+            errDiv.style.color = '#ef4444';
+            errDiv.style.fontSize = '12px';
+            errDiv.textContent = 'Error loading info.';
+            summaryContainer.appendChild(errDiv);
+
+            learnMoreBtn.textContent = 'Retry';
+            learnMoreBtn.dataset.loading = 'false';
+            learnMoreBtn.style.cursor = 'pointer';
+        }
+    };
+
+    linkComponent.appendChild(learnMoreBtn);
+    container.appendChild(linkComponent);
 
     return container;
 };
@@ -275,7 +401,7 @@ export const buildSearchResultsBlock = async (
 ): Promise<DocumentFragment> => {
     const fragment = document.createDocumentFragment();
 
-    // Fix: Reclassify articles that are actually videos/images
+    // Fix: Reclassify articles that are actually videos/images (legacy check, mostly unused now as we only search web)
     const processedItems = items.map((item) => {
         if (item.type === 'article' && item.url) {
             const u = item.url.toLowerCase();
@@ -302,78 +428,12 @@ export const buildSearchResultsBlock = async (
     };
 
     const searchableItems = processedItems.filter((item) => item.type !== 'snippet');
-    // STRICT FILTER: Only allow images that actually LOOK like images (url or thumbnail has extension).
-    // This prevents "Wikipedia pages" from being rendered as broken images.
-    const mediaItems = searchableItems.filter((item) => {
-        // Common filter: Exclude obvious logos or icons
-        const isLogo = (u: string) => /logo|icon|favicon/i.test(u);
-        if ((item.url && isLogo(item.url)) || (item.thumbnail && isLogo(item.thumbnail))) return false;
-
-        // Videos: Include if we have a URL (we can try to fetch thumb via proxy)
-        if (item.type === 'video') return !!item.url;
-
-        // Images: Include if we have a URL (we can fetch via proxy if it's a page)
-        if (item.type === 'image') return !!item.url;
-
-        return false;
-    })
-        .map((item) => {
-            // Score each media item for quality and interestingness
-            let score = 0;
-
-            // Base score by type (videos often more engaging)
-            if (item.type === 'video') score += 10;
-            if (item.type === 'image') score += 5;
-
-            // Quality indicators in URL or title
-            const text = `${item.url || ''} ${item.title || ''}`.toLowerCase();
-
-            // Positive signals (high-quality sources)
-            if (/wikipedia|wikimedia|nasa|smithsonian|museum|archive|\.edu|\.gov/.test(text)) score += 15;
-            if (/diagram|infographic|visualization|chart|graph|screenshot/.test(text)) score += 12;
-            if (/hd|high.?res|4k|original|full.?size/.test(text)) score += 8;
-            if (/official|documentation|research|scientific|academic/.test(text)) score += 10;
-
-            // Negative signals (low-quality or generic)
-            if (/stock|shutterstock|getty|istockphoto|dreamstime|pixabay|pexels/.test(text)) score -= 20;
-            if (/thumbnail|preview|sample|watermark/.test(text)) score -= 10;
-            if (/logo|icon|favicon|badge/.test(text)) score -= 15;
-            if (/ad|advertisement|promo|marketing/.test(text)) score -= 12;
-            if (/converter|download|tool|app|software/.test(text) && item.type === 'image') score -= 8;
-
-            // Title length (more descriptive = better)
-            if (item.title) {
-                const titleLength = item.title.length;
-                if (titleLength > 40 && titleLength < 120) score += 5;
-                if (titleLength < 20) score -= 3;
-            }
-
-            // Has both thumbnail and URL (more complete data)
-            if (item.thumbnail && item.url) score += 3;
-
-            return { ...item, qualityScore: score };
-        })
-        .sort((a, b) => {
-            // Sort by quality score (highest first)
-            return (b.qualityScore || 0) - (a.qualityScore || 0);
-        });
     const infoItems = searchableItems.filter((item) => item.type === 'article');
 
-    const bestVideo = mediaItems.find(i => i.type === 'video');
-    const bestImage = mediaItems.find(i => i.type === 'image');
-
-    const limitedMedia = [];
-    if (bestVideo) limitedMedia.push(bestVideo);
-    if (bestImage) limitedMedia.push(bestImage);
-    // const limitedInfo = infoItems.slice(0, 6); // we'll summarize these (unused var)
-
     const hasNotes = notes && notes.blocks.length > 0;
-    if (limitedMedia.length === 0 && infoItems.length === 0 && !hasNotes) {
-        const limitedInfo = infoItems.slice(0, 6);
-        if (limitedMedia.length === 0 && limitedInfo.length === 0 && !hasNotes) {
-            addTextBlock('No results found. Try a different search query.');
-            return fragment;
-        }
+    if (infoItems.length === 0 && !hasNotes) {
+        addTextBlock('No results found. Try a different search query.');
+        return fragment;
     }
 
     // 1. Sources Section (Viewed Sources) - TOP PRIORITY
@@ -382,11 +442,9 @@ export const buildSearchResultsBlock = async (
         // Container for all sources
         const sourcesContainer = document.createElement('div');
         sourcesContainer.dataset.aiText = 'true';
-        // sourcesContainer.className = 'mb-2'; // Removed CSS gap
 
         // Header
         const headerDiv = document.createElement('div');
-        // headerDiv.className = 'flex items-center gap-1 mb-1'; // Removed CSS layouts
         headerDiv.style.lineHeight = '1.5';
 
         // Larger lined caret icon (SVG chevron)
@@ -395,7 +453,7 @@ export const buildSearchResultsBlock = async (
         caret.style.display = 'inline';
         caret.style.transition = 'transform 0.2s';
         caret.style.color = '#6e6e6e';
-        caret.style.marginRight = '4px'; // Tiny text spacing
+        caret.style.marginRight = '4px';
 
         const headerSpan = createAiTextSpan(`Viewed ${sourceCount} source${sourceCount === 1 ? '' : 's'}`);
         headerDiv.appendChild(caret);
@@ -404,8 +462,6 @@ export const buildSearchResultsBlock = async (
         // Sources list container (initially hidden)
         const listContainer = document.createElement('div');
         listContainer.style.display = 'none';
-        // listContainer.style.paddingLeft = '4px'; // Removed CSS indent
-        // listContainer.style.marginTop = '4px';
 
         // Toggle visibility on caret click
         let isOpen = false;
@@ -433,9 +489,11 @@ export const buildSearchResultsBlock = async (
                 }
 
                 const sourceDiv = document.createElement('div');
-                sourceDiv.style.lineHeight = '1.5';
-                // sourceDiv.className = 'mb-0.5';
-                sourceDiv.appendChild(createStyledSourceLink(item.url, label));
+                sourceDiv.appendChild(createInteractiveSourceItem(
+                    item.url,
+                    label,
+                    item.snippet || '' // Pass snippet as context
+                ));
                 listContainer.appendChild(sourceDiv);
             }
         });
@@ -443,22 +501,13 @@ export const buildSearchResultsBlock = async (
         sourcesContainer.appendChild(headerDiv);
         sourcesContainer.appendChild(listContainer);
 
-        fragment.appendChild(createSpacer()); // Added gap above sources
+        fragment.appendChild(createSpacer());
         fragment.appendChild(sourcesContainer);
-        fragment.appendChild(createSpacer()); // Valid paragraph spacer
+        fragment.appendChild(createSpacer());
     }
 
-    // 2. Media Section (Images/Videos)
-    if (limitedMedia.length > 0) {
-        limitedMedia.forEach((item) => {
-            const card = createInlineResultCard(item);
-            fragment.appendChild(card);
-            fragment.appendChild(createSpacer());
-        });
-    }
-
-    // 3. Excerpt Section (Quote)
-    // Find the "best" excerpt from ARTICLES only
+    // 2. Excerpt Section (Quotes)
+    // Find the 1-3 "best" excerpts from ARTICLES only
     const meaningfulSnippets = searchableItems.filter((i) => {
         if (i.type !== 'article') return false; // STRICT: Only articles
         if (!i.snippet) return false;
@@ -491,59 +540,89 @@ export const buildSearchResultsBlock = async (
         return b.snippet!.length - a.snippet!.length; // Longest first
     });
 
-    const excerptItem = sortedSnippets[0];
+    // Take top 3 excerpts (initial candidate list)
+    // We want to default to just 1, but allow a 2nd if it's really good and distinct.
+    const candidates = sortedSnippets.slice(0, 3);
+    const topExcerpts: typeof candidates = [];
 
-    if (excerptItem) {
-        // Render excerpt as plain italic text (no link parsing to avoid duplicates)
-        const excerptText = `"${excerptItem.snippet || ''}"`;
+    if (candidates.length > 0) {
+        // ALWAYS take the best one
+        topExcerpts.push(candidates[0]);
 
-        const excerptP = document.createElement('p');
-        excerptP.dataset.aiText = 'true';
-        excerptP.style.lineHeight = '1.5';
+        // MAYBE take a second one if it's distinct and substantial
+        if (candidates.length > 1) {
+            const first = candidates[0];
+            const second = candidates[1];
 
-        const excerptSpan = createAiTextSpan(excerptText);
-        excerptSpan.style.fontStyle = 'italic';
-        excerptP.appendChild(excerptSpan);
+            const firstDomain = first.url ? new URL(first.url).hostname : 'a';
+            const secondDomain = second.url ? new URL(second.url).hostname : 'b';
 
-        fragment.appendChild(excerptP);
-
-        // Single source link below the excerpt (the ONLY link)
-        if (excerptItem.url) {
-            const linkWrapper = document.createElement('p');
-            linkWrapper.dataset.aiText = 'true';
-            linkWrapper.style.lineHeight = '1.5';
-            linkWrapper.appendChild(createStyledSourceLink(
-                excerptItem.url,
-                excerptItem.title || 'Open source'
-            ));
-            fragment.appendChild(linkWrapper);
-            fragment.appendChild(createSpacer());
-        } else {
-            fragment.appendChild(createSpacer());
+            // Conditions for adding a second excerpt:
+            // 1. Must be from a different domain (avoid redundancy)
+            // 2. Must be substantial (> 80 chars)
+            if (firstDomain !== secondDomain && (second.snippet?.length || 0) > 80) {
+                topExcerpts.push(second);
+            }
         }
     }
 
-    // 4. Information Section (AI Narrative)
-    if (notes) {
-        notes.blocks.forEach((block) => {
-            if (block.kind === 'ai') {
-                const aiP = document.createElement('p');
-                aiP.dataset.aiText = 'true';
-                if (block.text.trim().match(/\?$/)) {
-                    aiP.dataset.aiQuestion = 'true';
-                }
-                aiP.style.lineHeight = '1.5';
+    const cleanSnippet = (text: string): string => {
+        // Remove trailing markdown links: [label](url) or ([label](url))
+        let cleaned = text.replace(/\s*\(?\[[^\]]*\]\([^)]+\)\)?\.?$/g, '');
+        // Remove trailing raw URLs
+        cleaned = cleaned.replace(/\s*\(?https?:\/\/[^\s)]+\)?\.?$/g, '');
+        // Remove trailing domain names in parentheses like (en.wikipedia.org)
+        cleaned = cleaned.replace(/\s*\([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\)\.?$/g, '');
+        // Remove "Source: ..." or "Via: ..." at the end
+        cleaned = cleaned.replace(/\s*(?:Source|Via):.*$/i, '');
+        return cleaned.trim();
+    };
 
-                // Strict Sanitization
-                const sanitizedText = block.text.replace(/\[([^\]]*)\]\(([^)]+)\)/g, '$1');
-                aiP.appendChild(createAiTextWithLinksFragment(sanitizedText, '1.5'));
-                fragment.appendChild(aiP);
+    if (topExcerpts.length > 0) {
+        topExcerpts.forEach((excerptItem) => {
+            // Render excerpt as plain italic text, cleaned of citations
+            const rawSnippet = excerptItem.snippet || '';
+            const cleanedSnippet = cleanSnippet(rawSnippet);
+            const excerptText = `"${cleanedSnippet}"`;
+
+
+            const excerptP = document.createElement('p');
+            excerptP.dataset.aiText = 'true';
+            excerptP.style.lineHeight = '1.5';
+
+            const excerptSpan = createAiTextSpan(excerptText);
+            excerptSpan.style.fontStyle = 'italic';
+            excerptP.appendChild(excerptSpan);
+
+            fragment.appendChild(excerptP);
+
+            // Single source link below the excerpt
+            if (excerptItem.url) {
+                const linkWrapper = document.createElement('div'); // Changed p to div to avoid nesting issues
+                linkWrapper.dataset.aiText = 'true';
+                linkWrapper.style.lineHeight = '1.5';
+
+                // Use the interactive source item
+                linkWrapper.appendChild(createInteractiveSourceItem(
+                    excerptItem.url,
+                    excerptItem.title || 'Open source',
+                    excerptItem.snippet || '' // Pass snippet as context
+                ));
+
+                fragment.appendChild(linkWrapper);
+                fragment.appendChild(createSpacer()); // Spacer after each quote block
+            } else {
                 fragment.appendChild(createSpacer());
             }
         });
+    }
 
-        // 5. Questions Section (Input Blocks) - LAST
+    // 3. Questions Section (Input Blocks) - LAST
+    if (notes) {
         notes.blocks.forEach((block) => {
+            // IGNORE 'ai' blocks (Information Section) as per new requirements
+            // Only render input blocks (Questions)
+
             if (block.kind === 'input') {
                 // Flatten the input container - just output line by line
 

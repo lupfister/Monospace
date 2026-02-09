@@ -5,6 +5,7 @@ import cors from 'cors';
 import {
   handleAgentSearch,
   handleExpand,
+  handleExploreSource,
   handleFullReview,
   handleImprove,
   handlePlanSearch,
@@ -19,7 +20,7 @@ const PORT = Number(process.env.PORT || 4000);
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search';
+type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search' | 'explore_source';
 
 interface AiRequestBody {
   action: AiAction;
@@ -64,6 +65,13 @@ app.post('/api/ai/action', async (req: any, res: any) => {
     if (action === 'plan_search') {
       const plan = await handlePlanSearch(text, model, context);
       return res.json({ ok: true, plan });
+    }
+
+    if (action === 'explore_source') {
+      // For explore_source, 'text' is the URL
+      const previousContext = (req.body as any).previousContext;
+      const resultText = await handleExploreSource(text, model, previousContext);
+      return res.json({ ok: true, text: resultText });
     }
 
     return res.status(400).json({ ok: false, error: `Unsupported action: ${action}` });

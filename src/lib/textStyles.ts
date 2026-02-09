@@ -1,13 +1,13 @@
 /**
  * Fundamental text styling rules for the application:
- * - Gray sans serif 18pt Inter text = AI/system written
+ * - Gray sans serif 14pt Inter text = AI/system written
  * - Black serif 20pt Garamond text = human/user written
  */
 
 export const AI_TEXT_STYLE = {
   color: '#6e6e6e', // gray
   fontFamily: 'Inter, sans-serif',
-  fontSize: '18px',
+  fontSize: '14px',
   fontWeight: 350,
   fontVariationSettings: '"wght" 350',
 } as const;
@@ -127,7 +127,7 @@ export const createStyledSourceLink = (url: string, label: string): HTMLElement 
   textSpan.textContent = label;
   textSpan.style.color = '#6e6e6e';
   textSpan.style.fontFamily = 'Inter, sans-serif';
-  textSpan.style.fontSize = '18px';
+  textSpan.style.fontSize = AI_TEXT_STYLE.fontSize;
   textSpan.style.fontWeight = '350';
   textSpan.style.fontVariationSettings = '"wght" 350';
   textSpan.style.lineHeight = '1.5';
@@ -191,6 +191,6 @@ export const isAiTextSpan = (element: HTMLElement): boolean => {
   const style = window.getComputedStyle(element);
   const isGray = style.color === 'rgb(110, 110, 110)' || style.color === '#6e6e6e';
   const isInter = style.fontFamily.includes('Inter') || style.fontFamily.includes('inter');
-  const is18px = style.fontSize === '18px';
-  return isGray && isInter && is18px;
+  const is14px = style.fontSize === '14px';
+  return isGray && isInter && is14px;
 };

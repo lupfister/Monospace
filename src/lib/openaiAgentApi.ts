@@ -1,4 +1,4 @@
-export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search';
+export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search' | 'explore_source';
 
 export type SearchType = 'video' | 'image' | 'web';
 
@@ -66,7 +66,7 @@ export interface ContextBlock {
   text: string;
 }
 
-type InternalAiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search';
+type InternalAiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search' | 'explore_source';
 
 const mapActionToInternal = (action: AiAction): InternalAiAction => {
   if (action === 'search') return 'plan_search';
@@ -79,6 +79,7 @@ const postAiAction = async <TResponse>(body: {
   model?: string | null;
   searchContext?: unknown;
   context?: ContextBlock[];
+  previousContext?: string;
 }): Promise<TResponse> => {
   try {
     const res = await fetch('/api/ai/action', {
@@ -234,6 +235,35 @@ export const planSearch = async (
     };
   } catch {
     return { shouldSearch: false, queries: [] };
+  }
+};
+
+export const exploreSource = async (
+  url: string,
+  model?: string | null,
+  previousContext?: string,
+): Promise<{ ok: boolean; text?: string; error?: string }> => {
+  const trimmed = url.trim();
+  if (!trimmed) {
+    return { ok: false, error: 'No URL provided.' };
+  }
+
+  try {
+    const data = await postAiAction<{ ok: boolean; text: string }>({
+      action: 'explore_source',
+      text: trimmed,
+      model: model ?? undefined,
+      previousContext,
+    });
+
+    if (!data.ok || !data.text) {
+      return { ok: false, error: 'Empty response from AI.' };
+    }
+
+    return { ok: true, text: data.text };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: message };
   }
 };
 

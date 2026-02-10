@@ -36,6 +36,7 @@ export const createAiTextSpan = (text: string, lineHeight?: string): HTMLSpanEle
   span.style.whiteSpace = 'pre-wrap';
   span.textContent = text;
   span.setAttribute('data-ai-text', 'true');
+  span.setAttribute('data-ai-origin', 'true');
   return span;
 };
 
@@ -96,6 +97,7 @@ export const createStyledSourceLink = (url: string, label: string): HTMLElement 
   wrapper.style.maxWidth = '480px'; // Prevent very long links from breaking layout, but allow more title visibility
   wrapper.style.overflow = 'hidden';
   wrapper.setAttribute('data-ai-text', 'true');
+  wrapper.setAttribute('data-ai-origin', 'true');
 
   // Hover effect
   wrapper.onmouseenter = () => { wrapper.style.backgroundColor = 'var(--color-gray-200, #e5e7eb)'; };

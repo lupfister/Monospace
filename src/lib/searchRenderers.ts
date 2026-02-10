@@ -31,6 +31,7 @@ export const createLoadingShimmer = (phase: LoadingPhase = 'planning'): HTMLDivE
     container.className = 'ai-loading-shimmer';
     container.dataset.loadingPhase = phase;
     container.dataset.aiText = 'true';
+    container.dataset.aiOrigin = 'true';
     container.contentEditable = 'false';
     container.style.cssText = `
     display: block;
@@ -89,6 +90,7 @@ export const createErrorBlock = (error: AiError): HTMLDivElement => {
     container.className = 'ai-error-block';
     container.contentEditable = 'false';
     container.dataset.aiText = 'true';
+    container.dataset.aiOrigin = 'true';
     container.style.cssText = `
     padding: 12px 16px;
     background: #fef2f2;
@@ -264,6 +266,7 @@ export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
             const mediaWrapper = document.createElement('span'); // Span to be inline-ish but effective
             mediaWrapper.contentEditable = 'false'; // IMPORTANT: Unit as a whole
             mediaWrapper.dataset.aiText = 'true';
+            mediaWrapper.dataset.aiOrigin = 'true';
             mediaWrapper.style.display = 'inline-block';
             mediaWrapper.style.position = 'relative';
             mediaWrapper.style.overflow = 'hidden';
@@ -335,6 +338,7 @@ export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
         if (item.title || item.url) {
             const linkPara = document.createElement('p');
             linkPara.dataset.aiText = 'true';
+            linkPara.dataset.aiOrigin = 'true';
             linkPara.style.lineHeight = '1.5';
 
             // Use title or domain as label
@@ -369,6 +373,7 @@ export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
         container.className = resultCardClasses.item; // Keep existing style for articles
         container.dataset.resultType = item.type;
         container.dataset.aiText = 'true';
+        container.dataset.aiOrigin = 'true';
         if (item.url) container.dataset.url = item.url;
 
         container.appendChild(createAiTextBlock(item.snippet || item.title));
@@ -389,6 +394,7 @@ export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
 const createSpacer = () => {
     const el = document.createElement('p');
     el.dataset.aiText = 'true';
+    el.dataset.aiOrigin = 'true';
     el.style.lineHeight = '1.5';
     el.style.minHeight = '1.5em';
     el.appendChild(document.createElement('br'));
@@ -419,8 +425,10 @@ export const buildSearchResultsBlock = async (
     const addTextBlock = (content: DocumentFragment | string) => {
         const p = document.createElement('p');
         p.style.lineHeight = '1.5';
+        p.dataset.aiText = 'true';
+        p.dataset.aiOrigin = 'true';
         if (typeof content === 'string') {
-            p.textContent = content;
+            p.appendChild(createAiTextSpan(content));
         } else {
             p.appendChild(content);
         }
@@ -442,6 +450,7 @@ export const buildSearchResultsBlock = async (
         // Container for all sources
         const sourcesContainer = document.createElement('div');
         sourcesContainer.dataset.aiText = 'true';
+        sourcesContainer.dataset.aiOrigin = 'true';
 
         // Header
         const headerDiv = document.createElement('div');
@@ -588,6 +597,7 @@ export const buildSearchResultsBlock = async (
 
             const excerptP = document.createElement('p');
             excerptP.dataset.aiText = 'true';
+            excerptP.dataset.aiOrigin = 'true';
             excerptP.style.lineHeight = '1.5';
 
             const excerptSpan = createAiTextSpan(excerptText);
@@ -600,6 +610,7 @@ export const buildSearchResultsBlock = async (
             if (excerptItem.url) {
                 const linkWrapper = document.createElement('div'); // Changed p to div to avoid nesting issues
                 linkWrapper.dataset.aiText = 'true';
+                linkWrapper.dataset.aiOrigin = 'true';
                 linkWrapper.style.lineHeight = '1.5';
 
                 // Use the interactive source item
@@ -629,6 +640,7 @@ export const buildSearchResultsBlock = async (
                 // Question Prompt
                 const promptP = document.createElement('p');
                 promptP.dataset.aiText = 'true';
+                promptP.dataset.aiOrigin = 'true';
                 promptP.dataset.aiQuestion = 'true';
                 promptP.style.lineHeight = '1.5';
                 promptP.appendChild(createAiTextSpan(block.prompt));

@@ -58,6 +58,75 @@ export function DocumentEditor() {
 
   const isBusy = isLoading;
 
+  const refreshHiddenAi = useCallback(() => {
+    const root = editorRef.current;
+    if (!root) return;
+
+    if (showAiText) {
+      root.querySelectorAll('[data-ai-hidden="true"]').forEach((el) => {
+        (el as HTMLElement).removeAttribute('data-ai-hidden');
+      });
+      root.querySelectorAll('[data-ai-contains-highlight="true"]').forEach((el) => {
+        (el as HTMLElement).removeAttribute('data-ai-contains-highlight');
+      });
+      return;
+    }
+
+    root.querySelectorAll('[data-ai-hidden="true"]').forEach((el) => {
+      (el as HTMLElement).removeAttribute('data-ai-hidden');
+    });
+    root.querySelectorAll('[data-ai-contains-highlight="true"]').forEach((el) => {
+      (el as HTMLElement).removeAttribute('data-ai-contains-highlight');
+    });
+
+    const aiNodes = new Set<HTMLElement>();
+    root.querySelectorAll('[data-ai-text="true"], [data-ai-question="true"], [data-ai-origin="true"], span[role="link"]').forEach((el) => {
+      aiNodes.add(el as HTMLElement);
+    });
+    root.querySelectorAll('span').forEach((span) => {
+      const el = span as HTMLElement;
+      if (isAiTextSpan(el)) {
+        aiNodes.add(el);
+      }
+    });
+
+    aiNodes.forEach((el) => {
+      if (el !== root) {
+        el.setAttribute('data-ai-hidden', 'true');
+      }
+    });
+
+    const wrapAiTextNodes = (container: HTMLElement) => {
+      Array.from(container.childNodes).forEach((node) => {
+        if (node.nodeType !== Node.TEXT_NODE) return;
+        const text = node.textContent || '';
+        if (!text.trim()) return;
+        if ((node as Text).parentElement?.closest('[data-ai-highlighted="true"]')) return;
+        const span = document.createElement('span');
+        span.setAttribute('data-ai-text', 'true');
+        span.setAttribute('data-ai-hidden', 'true');
+        span.textContent = text;
+        node.parentNode?.insertBefore(span, node);
+        node.parentNode?.removeChild(node);
+      });
+    };
+
+    root.querySelectorAll('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]').forEach((el) => {
+      wrapAiTextNodes(el as HTMLElement);
+    });
+
+    root.querySelectorAll('[data-ai-highlighted="true"]').forEach((el) => {
+      (el as HTMLElement).removeAttribute('data-ai-hidden');
+      let node: HTMLElement | null = el as HTMLElement;
+      while (node && node !== root) {
+        if (node.getAttribute('data-ai-hidden') === 'true') {
+          node.setAttribute('data-ai-contains-highlight', 'true');
+        }
+        node = node.parentElement;
+      }
+    });
+  }, [showAiText]);
+
   // Track selection changes to support toolbar actions that steal focus (like Select)
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -68,11 +137,14 @@ export function DocumentEditor() {
           lastKnownRange.current = range.cloneRange();
         }
       }
+      if (!showAiText) {
+        refreshHiddenAi();
+      }
     };
 
     document.addEventListener('selectionchange', handleSelectionChange);
     return () => document.removeEventListener('selectionchange', handleSelectionChange);
-  }, []);
+  }, [showAiText, refreshHiddenAi]);
 
   // Auto-set margin side when there are texts
   useEffect(() => {
@@ -163,11 +235,33 @@ export function DocumentEditor() {
 
         // Tag existing AI text
         if (editorRef.current) {
+          editorRef.current.querySelectorAll('[data-ai-text="true"]').forEach((el) => {
+            (el as HTMLElement).setAttribute('data-ai-origin', 'true');
+          });
+
           const spans = editorRef.current.querySelectorAll('span');
           spans.forEach((span: HTMLSpanElement) => {
             if (isAiTextSpan(span) || span.querySelector('svg')) { // Simple check for likely AI text or source links
               if (isAiTextSpan(span) || span.getAttribute('role') === 'link') {
                 span.setAttribute('data-ai-text', 'true');
+                span.setAttribute('data-ai-origin', 'true');
+                const parent = span.parentElement;
+                if (parent && parent !== editorRef.current) {
+                  const onlyAiChildren = Array.from(parent.childNodes).every((node) => {
+                    if (node.nodeType === Node.TEXT_NODE) {
+                      return !(node.textContent || '').trim();
+                    }
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                      const el = node as HTMLElement;
+                      if (el.tagName === 'BR') return true;
+                      return el.getAttribute('data-ai-origin') === 'true' || isAiTextSpan(el);
+                    }
+                    return false;
+                  });
+                  if (onlyAiChildren) {
+                    parent.setAttribute('data-ai-origin', 'true');
+                  }
+                }
               }
             }
           });
@@ -175,6 +269,10 @@ export function DocumentEditor() {
       });
     }
   }, [hydrateSearchResultImages, normalizeContent]);
+
+  useEffect(() => {
+    refreshHiddenAi();
+  }, [refreshHiddenAi]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -623,6 +721,7 @@ export function DocumentEditor() {
                 const span = document.createElement('span');
                 span.setAttribute('data-ai-highlighted', 'true');
                 span.setAttribute('data-ai-text', 'true');
+                span.setAttribute('data-ai-origin', 'true');
                 const style = window.getComputedStyle(cp);
                 span.style.fontFamily = style.fontFamily;
                 span.style.fontSize = style.fontSize;
@@ -728,6 +827,7 @@ export function DocumentEditor() {
 
   // Helper to preserve AI context (questions, spacers) when user edits
   const preserveAiContext = useCallback((startNode: Node) => {
+    if (!showAiText) return;
     let currentBlock = startNode.nodeType === Node.ELEMENT_NODE
       ? startNode as HTMLElement
       : startNode.parentElement;
@@ -736,6 +836,7 @@ export function DocumentEditor() {
     while (currentBlock && editorRef.current && editorRef.current.contains(currentBlock) && currentBlock !== editorRef.current) {
       if (currentBlock.getAttribute('data-ai-text') === 'true') {
         currentBlock.removeAttribute('data-ai-text');
+        currentBlock.removeAttribute('data-ai-origin');
       }
 
       // 2. Check preceding siblings for Questions + Spacers
@@ -773,8 +874,10 @@ export function DocumentEditor() {
           // Found the question, un-tag everything in between
           siblingsToUntag.forEach(el => {
             el.removeAttribute('data-ai-text');
+            el.removeAttribute('data-ai-origin');
             // Also untag any children (like spans) that might be hidden
             el.querySelectorAll('[data-ai-text="true"]').forEach(child => child.removeAttribute('data-ai-text'));
+            el.querySelectorAll('[data-ai-origin="true"]').forEach(child => child.removeAttribute('data-ai-origin'));
           });
           break; // Done with this chain
         }
@@ -785,7 +888,63 @@ export function DocumentEditor() {
 
       currentBlock = currentBlock.parentElement;
     }
-  }, []);
+  }, [showAiText]);
+
+  const ensureVisibleInsertionPoint = useCallback((range: Range) => {
+    if (showAiText) return;
+
+    const startNode = range.startContainer;
+    const startElement = startNode.nodeType === Node.ELEMENT_NODE
+      ? startNode as Element
+      : startNode.parentElement;
+    if (!startElement) return;
+
+    const aiContainer = startElement.closest('[data-ai-origin="true"]') as HTMLElement | null;
+    if (!aiContainer) return;
+
+    if (
+      aiContainer.tagName === 'SPAN' &&
+      aiContainer.childNodes.length === 1 &&
+      aiContainer.firstChild?.nodeType === Node.TEXT_NODE &&
+      range.startContainer.nodeType === Node.TEXT_NODE
+    ) {
+      const textNode = aiContainer.firstChild as Text;
+      const offset = range.startOffset;
+      const text = textNode.data || '';
+      const beforeText = text.slice(0, offset);
+      const afterText = text.slice(offset);
+
+      const parent = aiContainer.parentNode;
+      if (!parent) return;
+
+      const beforeSpan = beforeText ? (aiContainer.cloneNode(false) as HTMLElement) : null;
+      const afterSpan = afterText ? (aiContainer.cloneNode(false) as HTMLElement) : null;
+
+      if (beforeSpan) {
+        beforeSpan.appendChild(document.createTextNode(beforeText));
+        parent.insertBefore(beforeSpan, aiContainer);
+      }
+      if (afterSpan) {
+        afterSpan.appendChild(document.createTextNode(afterText));
+        parent.insertBefore(afterSpan, aiContainer.nextSibling);
+      }
+
+      parent.removeChild(aiContainer);
+
+      if (beforeSpan) {
+        range.setStartAfter(beforeSpan);
+      } else if (afterSpan) {
+        range.setStartBefore(afterSpan);
+      } else {
+        range.setStart(parent, parent.childNodes.length);
+      }
+      range.collapse(true);
+      return;
+    }
+
+    range.setStartAfter(aiContainer);
+    range.collapse(true);
+  }, [showAiText]);
 
   const insertStyledText = (text: string) => {
     const selection = window.getSelection();
@@ -793,6 +952,8 @@ export function DocumentEditor() {
     const range = selection.getRangeAt(0);
 
 
+    ensureVisibleInsertionPoint(range);
+    ensureVisibleInsertionPoint(range);
     preserveAiContext(range.commonAncestorContainer);
 
     // Clear placeholder logic
@@ -1179,7 +1340,7 @@ export function DocumentEditor() {
       <style dangerouslySetInnerHTML={{
         __html: `
           [data-ai-highlighted="true"] {
-            background-color: #fff200;
+            background-color: #fff7a5;
             color: #000;
             padding: 1px 0;
             border-radius: 2px;
@@ -1191,23 +1352,17 @@ export function DocumentEditor() {
       {!showAiText && (
         <style dangerouslySetInnerHTML={{
           __html: `
-            [data-ai-text="true"]:not([data-ai-highlighted="true"]) {
-              color: transparent !important;
-              font-size: 0 !important;
-              line-height: 0 !important;
-              display: inline-block;
-              width: 0;
-              height: 0;
-              overflow: hidden;
-              vertical-align: top;
+            [data-ai-hidden="true"] {
+              display: none;
             }
+
+            [data-ai-contains-highlight="true"] {
+              display: contents;
+            }
+
             [data-ai-highlighted="true"] {
-              color: #000 !important;
-              font-size: 18px !important;
-              line-height: 1.5 !important;
-              display: inline !important;
-              background-color: #fff200 !important;
-              visibility: visible !important;
+              display: inline;
+              visibility: visible;
             }
           `
         }} />

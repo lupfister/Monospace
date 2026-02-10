@@ -252,6 +252,11 @@ export function DocumentEditor() {
     }
   }, []);
 
+  const isAiElement = useCallback((el: HTMLElement): boolean => {
+    return el.getAttribute('data-ai-text') === 'true' || el.getAttribute('data-ai-origin') === 'true';
+  }, []);
+
+
   // Load saved content on mount
   useEffect(() => {
     const savedContent = localStorage.getItem('documentContent');
@@ -297,6 +302,7 @@ export function DocumentEditor() {
       });
     }
   }, [hydrateSearchResultImages, normalizeContent]);
+
 
   useEffect(() => {
     refreshHiddenAi();

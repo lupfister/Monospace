@@ -147,29 +147,7 @@ export function DocumentEditor() {
       if (block) highlightParents.add(block);
     });
 
-    const createHighlightClone = (span: HTMLElement) => {
-      const clone = document.createElement('span');
-      clone.dataset.aiHighlightClone = 'true';
-      clone.textContent = span.textContent;
-      const style = window.getComputedStyle(span);
-      clone.style.fontFamily = style.fontFamily;
-      clone.style.fontSize = style.fontSize;
-      clone.style.fontWeight = style.fontWeight;
-      clone.style.color = style.color;
-      clone.style.fontStyle = style.fontStyle;
-      clone.style.lineHeight = style.lineHeight;
-      clone.style.backgroundColor = 'transparent';
-      clone.style.display = 'inline';
-      return clone;
-    };
 
-    highlightSpans.forEach((span) => {
-      const parentBlock = span.closest('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]');
-      if (parentBlock && parentBlock.parentNode) {
-        const clone = createHighlightClone(span);
-        parentBlock.parentNode.insertBefore(clone, parentBlock.nextSibling);
-      }
-    });
 
     highlightParents.forEach((block) => {
       block.removeAttribute('data-ai-hidden');
@@ -678,7 +656,7 @@ export function DocumentEditor() {
             while (fragmentToInsert.firstChild) wrapper.appendChild(fragmentToInsert.firstChild);
             range.insertNode(wrapper);
 
-            preserveAiContext(range.commonAncestorContainer);
+            claimAiContent(range.commonAncestorContainer);
           } else {
             let range = document.caretRangeFromPoint(e.clientX, e.clientY);
             if (range && editorRef.current && draggedFragment.current) {
@@ -686,7 +664,7 @@ export function DocumentEditor() {
               const wrapper = document.createDocumentFragment();
               while (fragmentToInsert.firstChild) wrapper.appendChild(fragmentToInsert.firstChild);
               range.insertNode(wrapper);
-              preserveAiContext(range.commonAncestorContainer);
+              claimAiContent(range.commonAncestorContainer);
             }
           }
           window.getSelection()?.removeAllRanges();
@@ -770,8 +748,7 @@ export function DocumentEditor() {
                 if (cp.getAttribute('data-ai-highlighted') === 'true') return;
                 const span = document.createElement('span');
                 span.setAttribute('data-ai-highlighted', 'true');
-                span.setAttribute('data-ai-text', 'true');
-                span.setAttribute('data-ai-origin', 'true');
+
                 const style = window.getComputedStyle(cp);
                 span.style.fontFamily = style.fontFamily;
                 span.style.fontSize = style.fontSize;
@@ -875,70 +852,21 @@ export function DocumentEditor() {
   };
 
 
-  // Helper to preserve AI context (questions, spacers) when user edits
-  const preserveAiContext = useCallback((startNode: Node) => {
-    if (!showAiText) return;
+  // Helper to ensure edited content is visible
+  const claimAiContent = useCallback((startNode: Node) => {
     let currentBlock = startNode.nodeType === Node.ELEMENT_NODE
       ? startNode as HTMLElement
       : startNode.parentElement;
 
-    // 1. Untag the current block (User is editing it)
+    // Untag the current block (User is editing it)
     while (currentBlock && editorRef.current && editorRef.current.contains(currentBlock) && currentBlock !== editorRef.current) {
       if (currentBlock.getAttribute('data-ai-text') === 'true') {
         currentBlock.removeAttribute('data-ai-text');
         currentBlock.removeAttribute('data-ai-origin');
       }
-
-      // 2. Check preceding siblings for Questions + Spacers
-      let sibling = currentBlock.previousElementSibling as HTMLElement | null;
-      let siblingsToUntag: HTMLElement[] = [];
-
-      while (sibling) {
-        const isAi = sibling.getAttribute('data-ai-text') === 'true';
-        let isQuestion = sibling.getAttribute('data-ai-question') === 'true';
-
-        // Deep check: If sibling is an AI container but not explicitly a question, 
-        // check if its last flow content is a question.
-        if (isAi && !isQuestion && sibling.lastElementChild) {
-          let inner = sibling.lastElementChild as HTMLElement;
-          // Traverse backwards inside the container to find the "active" end content
-          while (inner) {
-            const innerAi = inner.getAttribute('data-ai-text') === 'true';
-            const innerQuestion = inner.getAttribute('data-ai-question') === 'true';
-
-            // If we hit non-AI text inside, we stop.
-            if (!innerAi) break;
-
-            if (innerQuestion) {
-              isQuestion = true;
-              break;
-            }
-            inner = inner.previousElementSibling as HTMLElement;
-          }
-        }
-
-        if (!isAi) break; // Stop if we hit human text
-
-        if (isQuestion) {
-          siblingsToUntag.push(sibling);
-          // Found the question, un-tag everything in between
-          siblingsToUntag.forEach(el => {
-            el.removeAttribute('data-ai-text');
-            el.removeAttribute('data-ai-origin');
-            // Also untag any children (like spans) that might be hidden
-            el.querySelectorAll('[data-ai-text="true"]').forEach(child => child.removeAttribute('data-ai-text'));
-            el.querySelectorAll('[data-ai-origin="true"]').forEach(child => child.removeAttribute('data-ai-origin'));
-          });
-          break; // Done with this chain
-        }
-
-        siblingsToUntag.push(sibling);
-        sibling = sibling.previousElementSibling as HTMLElement | null;
-      }
-
       currentBlock = currentBlock.parentElement;
     }
-  }, [showAiText]);
+  }, []);
 
   const ensureVisibleInsertionPoint = useCallback((range: Range) => {
     if (showAiText) return;
@@ -1019,9 +947,9 @@ export function DocumentEditor() {
     const range = selection.getRangeAt(0);
 
 
-    ensureVisibleInsertionPoint(range);
-    ensureVisibleInsertionPoint(range);
-    preserveAiContext(range.commonAncestorContainer);
+
+    claimAiContent(range.commonAncestorContainer);
+
 
     // Clear placeholder logic
     if (editorRef.current) {
@@ -1212,8 +1140,8 @@ export function DocumentEditor() {
       range.collapse(false);
     }
 
-    preserveAiContext(range.commonAncestorContainer);
 
+    claimAiContent(range.commonAncestorContainer);
     // Clear placeholder logic if we're at the beginning and the placeholder is there
     const firstChild = editorRef.current.firstElementChild;
     if (firstChild && firstChild.tagName === 'P') {

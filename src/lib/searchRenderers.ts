@@ -641,7 +641,6 @@ export const buildSearchResultsBlock = async (
                 const promptP = document.createElement('p');
                 promptP.dataset.aiText = 'true';
                 promptP.dataset.aiOrigin = 'true';
-                promptP.dataset.aiQuestion = 'true';
                 promptP.style.lineHeight = '1.5';
                 promptP.appendChild(createAiTextSpan(block.prompt));
                 fragment.appendChild(promptP);

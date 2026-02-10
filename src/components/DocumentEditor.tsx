@@ -115,6 +115,10 @@ export function DocumentEditor() {
       wrapAiTextNodes(el as HTMLElement);
     });
 
+    root.querySelectorAll('[data-ai-text="true"]:not([data-ai-highlighted="true"])').forEach((el) => {
+      (el as HTMLElement).setAttribute('data-ai-hidden', 'true');
+    });
+
     root.querySelectorAll('[data-ai-highlighted="true"]').forEach((el) => {
       (el as HTMLElement).removeAttribute('data-ai-hidden');
       let node: HTMLElement | null = el as HTMLElement;
@@ -946,6 +950,23 @@ export function DocumentEditor() {
     range.collapse(true);
   }, [showAiText]);
 
+  const getHighlightSpan = (range: Range): HTMLElement | null => {
+    const startNode = range.startContainer;
+    const startElement = startNode.nodeType === Node.ELEMENT_NODE
+      ? startNode as Element
+      : startNode.parentElement;
+    if (!startElement) return null;
+    return startElement.closest('[data-ai-highlighted="true"]') as HTMLElement | null;
+  };
+
+  const isAtEndOfHighlight = (range: Range, highlightSpan: HTMLElement): boolean => {
+    if (!range.collapsed) return false;
+    const endRange = document.createRange();
+    endRange.selectNodeContents(highlightSpan);
+    endRange.collapse(false);
+    return range.compareBoundaryPoints(Range.END_TO_END, endRange) === 0;
+  };
+
   const insertStyledText = (text: string) => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || !editorRef.current) return;
@@ -977,6 +998,39 @@ export function DocumentEditor() {
     }
 
     if (!range.collapsed) range.deleteContents();
+
+    const highlightSpan = !showAiText ? getHighlightSpan(range) : null;
+    if (!showAiText && highlightSpan) {
+      const textNode = range.startContainer.nodeType === Node.TEXT_NODE
+        ? range.startContainer as Text
+        : highlightSpan.firstChild as Text | null;
+      if (textNode && highlightSpan.contains(textNode)) {
+        const offset = range.startContainer === textNode ? range.startOffset : textNode.length;
+        const before = textNode.data.slice(0, offset);
+        const after = textNode.data.slice(offset);
+        const parent = highlightSpan.parentNode;
+        if (parent) {
+          if (before) {
+            const beforeSpan = highlightSpan.cloneNode(false) as HTMLElement;
+            beforeSpan.textContent = before;
+            parent.insertBefore(beforeSpan, highlightSpan);
+          }
+          const humanSpan = createHumanTextSpan(text, '1');
+          parent.insertBefore(humanSpan, highlightSpan);
+          if (after) {
+            const afterSpan = highlightSpan.cloneNode(false) as HTMLElement;
+            afterSpan.textContent = after;
+            parent.insertBefore(afterSpan, highlightSpan);
+          }
+          parent.removeChild(highlightSpan);
+          range.setStartAfter(humanSpan);
+          range.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          return;
+        }
+      }
+    }
 
     // If we are inside a text node that belongs to a human span, just insert the text
     if (range.startContainer.nodeType === Node.TEXT_NODE) {
@@ -1036,6 +1090,34 @@ export function DocumentEditor() {
       e.stopPropagation();
       handleAiReview();
       return;
+    }
+
+    if (!ctrlKey && !e.metaKey && !e.altKey && e.key === 'Enter' && !showAiText) {
+      const selection = window.getSelection();
+      if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        const highlightSpan = getHighlightSpan(range);
+        if (highlightSpan) {
+          if (isAtEndOfHighlight(range, highlightSpan)) {
+            e.preventDefault();
+            e.stopPropagation();
+            const aiBlock = highlightSpan.closest('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]') as HTMLElement | null;
+            const target = aiBlock ?? highlightSpan;
+            const p = document.createElement('p');
+            p.style.lineHeight = '1.5';
+            p.appendChild(document.createElement('br'));
+            target.parentNode?.insertBefore(p, target.nextSibling);
+            const newRange = document.createRange();
+            newRange.setStart(p, 0);
+            newRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+            return;
+          }
+          setShowAiText(true);
+          return;
+        }
+      }
     }
 
     if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {

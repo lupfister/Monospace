@@ -78,6 +78,12 @@ export function DocumentEditor() {
     root.querySelectorAll('[data-ai-contains-highlight="true"]').forEach((el) => {
       (el as HTMLElement).removeAttribute('data-ai-contains-highlight');
     });
+    root.querySelectorAll('[data-ai-show-highlight="true"]').forEach((el) => {
+      (el as HTMLElement).removeAttribute('data-ai-show-highlight');
+    });
+    root.querySelectorAll('[data-ai-highlight-clone="true"]').forEach((clone) => {
+      clone.remove();
+    });
 
     const aiNodes = new Set<HTMLElement>();
     root.querySelectorAll('[data-ai-text="true"], [data-ai-question="true"], [data-ai-origin="true"], span[role="link"]').forEach((el) => {
@@ -119,6 +125,7 @@ export function DocumentEditor() {
       (el as HTMLElement).setAttribute('data-ai-hidden', 'true');
     });
 
+    const highlightParents = new Set<HTMLElement>();
     root.querySelectorAll('[data-ai-highlighted="true"]').forEach((el) => {
       (el as HTMLElement).removeAttribute('data-ai-hidden');
       let node: HTMLElement | null = el as HTMLElement;
@@ -128,6 +135,45 @@ export function DocumentEditor() {
         }
         node = node.parentElement;
       }
+      const block = (el as HTMLElement).closest('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]') as HTMLElement | null;
+      if (block) {
+        highlightParents.add(block);
+      }
+    });
+
+    const highlightSpans = Array.from(root.querySelectorAll('[data-ai-highlighted="true"]')) as HTMLElement[];
+    highlightSpans.forEach((el) => {
+      const block = el.closest('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]') as HTMLElement | null;
+      if (block) highlightParents.add(block);
+    });
+
+    const createHighlightClone = (span: HTMLElement) => {
+      const clone = document.createElement('span');
+      clone.dataset.aiHighlightClone = 'true';
+      clone.textContent = span.textContent;
+      const style = window.getComputedStyle(span);
+      clone.style.fontFamily = style.fontFamily;
+      clone.style.fontSize = style.fontSize;
+      clone.style.fontWeight = style.fontWeight;
+      clone.style.color = style.color;
+      clone.style.fontStyle = style.fontStyle;
+      clone.style.lineHeight = style.lineHeight;
+      clone.style.backgroundColor = 'transparent';
+      clone.style.display = 'inline';
+      return clone;
+    };
+
+    highlightSpans.forEach((span) => {
+      const parentBlock = span.closest('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]');
+      if (parentBlock && parentBlock.parentNode) {
+        const clone = createHighlightClone(span);
+        parentBlock.parentNode.insertBefore(clone, parentBlock.nextSibling);
+      }
+    });
+
+    highlightParents.forEach((block) => {
+      block.removeAttribute('data-ai-hidden');
+      block.setAttribute('data-ai-show-highlight', 'true');
     });
   }, [showAiText]);
 
@@ -1445,6 +1491,25 @@ export function DocumentEditor() {
             [data-ai-highlighted="true"] {
               display: inline;
               visibility: visible;
+            }
+
+            [data-ai-show-highlight="true"] {
+              display: block !important;
+              visibility: hidden;
+            }
+
+            [data-ai-show-highlight="true"] [data-ai-highlighted="true"] {
+              visibility: visible;
+              display: inline;
+            }
+
+            [data-ai-highlight-clone="true"] {
+              display: block;
+              font-family: inherit;
+              font-size: inherit;
+              line-height: 1.5;
+              color: inherit;
+              margin-top: 0.25rem;
             }
           `
         }} />

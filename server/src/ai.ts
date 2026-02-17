@@ -1,7 +1,7 @@
 import { Agent, run, webSearchTool } from '@openai/agents';
 import { z } from 'zod';
 
-export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search';
+export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search' | 'title';
 
 export type SearchType = 'video' | 'image' | 'web';
 
@@ -83,6 +83,18 @@ export const handleSummarize = async (text: string, model?: string | null): Prom
   )}`;
   return runBasicAgent(
     'You are a concise writing assistant. Always respond with plain text only, no markdown or bullet points unless explicitly requested.',
+    prompt,
+    model,
+  );
+};
+
+export const handleTitle = async (text: string, model?: string | null): Promise<string> => {
+  const prompt = `Create a short, descriptive title (2–6 words) based on the text below. Use Title Case. Return only the title.\n\nText:\n${text.slice(
+    0,
+    2000,
+  )}`;
+  return runBasicAgent(
+    'You generate concise document titles. Return only the title text with no quotes or punctuation.',
     prompt,
     model,
   );
@@ -568,4 +580,3 @@ export const handleFullReview = async (
 
   return { plan, searchResults, narrative };
 };
-

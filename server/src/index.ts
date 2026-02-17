@@ -11,6 +11,7 @@ import {
   handlePlanSearch,
   handleReviewSkeletonNotes,
   handleSummarize,
+  handleTitle,
   parseAgentSearchRequest,
 } from './ai';
 
@@ -20,7 +21,7 @@ const PORT = Number(process.env.PORT || 4000);
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search' | 'explore_source';
+type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search' | 'explore_source' | 'title';
 
 interface AiRequestBody {
   action: AiAction;
@@ -43,6 +44,11 @@ app.post('/api/ai/action', async (req: any, res: any) => {
   try {
     if (action === 'summarize') {
       const resultText = await handleSummarize(text, model);
+      return res.json({ ok: true, text: resultText });
+    }
+
+    if (action === 'title') {
+      const resultText = await handleTitle(text, model);
       return res.json({ ok: true, text: resultText });
     }
 
@@ -334,4 +340,3 @@ if (require.main === module) {
     console.log(`AI server listening on http://localhost:${PORT}`);
   });
 }
-

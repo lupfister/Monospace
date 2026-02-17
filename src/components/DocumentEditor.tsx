@@ -1,16 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import {
-  Bold,
-  Italic,
-  Underline,
-  List,
-  ListOrdered,
-  MoveHorizontal,
-  Sparkles,
-  Loader2,
-  Eye,
-  EyeOff
-} from 'lucide-react';
+import { MoveHorizontal, Sparkles, Loader2, Eye, EyeOff } from 'lucide-react';
 import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan } from '../lib/textStyles';
 import { isProbablyUrl } from '../lib/linkPreviews';
 
@@ -18,10 +7,17 @@ import { useLinkHydrator } from '../hooks/useLinkHydrator';
 import { useSearchAgent } from '../hooks/useSearchAgent';
 import { MarginTextContainer, MarginTextData } from './MarginTextContainer';
 import { OPENAI_MODEL_OPTIONS } from '../lib/openaiAgentApi';
+import { generateWithOpenAI } from '../lib/openaiAgentApi';
 import { LineHeightHandle } from './LineHeightHandle';
+import type { LocalDocument } from '../lib/localDocuments';
 
+type DocumentEditorProps = {
+  doc: LocalDocument;
+  onSave: (docId: string, content: string, title: string) => void;
+  onBack: () => void;
+};
 
-export function DocumentEditor() {
+export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -55,6 +51,8 @@ export function DocumentEditor() {
   const [selectedModel, setSelectedModel] = useState('gpt-4o-mini');
   const [showAiText, setShowAiText] = useState(true);
   const { handleAiReview, cancelReview, isLoading, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(editorRef, selectedModel, hydrateSearchResultImages);
+  const [isTitleGenerating, setIsTitleGenerating] = useState(false);
+  const titleGeneratedRef = useRef<Set<string>>(new Set());
 
   const isBusy = isLoading;
 
@@ -252,6 +250,11 @@ export function DocumentEditor() {
     }
   }, []);
 
+  const isPlaceholderHtml = useCallback((html: string) => {
+    const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    return text === 'Start writing...';
+  }, []);
+
   const isAiElement = useCallback((el: HTMLElement): boolean => {
     return el.getAttribute('data-ai-text') === 'true' || el.getAttribute('data-ai-origin') === 'true';
   }, []);
@@ -259,49 +262,48 @@ export function DocumentEditor() {
 
   // Load saved content on mount
   useEffect(() => {
-    const savedContent = localStorage.getItem('documentContent');
-    if (savedContent && editorRef.current) {
-      editorRef.current.innerHTML = savedContent;
-      requestAnimationFrame(() => {
-        hydrateSearchResultImages(editorRef.current);
-        normalizeContent();
+    if (!editorRef.current) return;
+    if (!doc.content || isPlaceholderHtml(doc.content)) return;
 
-        // Tag existing AI text
-        if (editorRef.current) {
-          editorRef.current.querySelectorAll('[data-ai-text="true"]').forEach((el) => {
-            (el as HTMLElement).setAttribute('data-ai-origin', 'true');
-          });
+    editorRef.current.innerHTML = doc.content;
+    requestAnimationFrame(() => {
+      if (!editorRef.current) return;
+      hydrateSearchResultImages(editorRef.current);
+      normalizeContent();
 
-          const spans = editorRef.current.querySelectorAll('span');
-          spans.forEach((span: HTMLSpanElement) => {
-            if (isAiTextSpan(span) || span.querySelector('svg')) { // Simple check for likely AI text or source links
-              if (isAiTextSpan(span) || span.getAttribute('role') === 'link') {
-                span.setAttribute('data-ai-text', 'true');
-                span.setAttribute('data-ai-origin', 'true');
-                const parent = span.parentElement;
-                if (parent && parent !== editorRef.current) {
-                  const onlyAiChildren = Array.from(parent.childNodes).every((node) => {
-                    if (node.nodeType === Node.TEXT_NODE) {
-                      return !(node.textContent || '').trim();
-                    }
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                      const el = node as HTMLElement;
-                      if (el.tagName === 'BR') return true;
-                      return el.getAttribute('data-ai-origin') === 'true' || isAiTextSpan(el);
-                    }
-                    return false;
-                  });
-                  if (onlyAiChildren) {
-                    parent.setAttribute('data-ai-origin', 'true');
-                  }
+      // Tag existing AI text
+      editorRef.current.querySelectorAll('[data-ai-text="true"]').forEach((el) => {
+        (el as HTMLElement).setAttribute('data-ai-origin', 'true');
+      });
+
+      const spans = editorRef.current.querySelectorAll('span');
+      spans.forEach((span: HTMLSpanElement) => {
+        if (isAiTextSpan(span) || span.querySelector('svg')) { // Simple check for likely AI text or source links
+          if (isAiTextSpan(span) || span.getAttribute('role') === 'link') {
+            span.setAttribute('data-ai-text', 'true');
+            span.setAttribute('data-ai-origin', 'true');
+            const parent = span.parentElement;
+            if (parent && parent !== editorRef.current) {
+              const onlyAiChildren = Array.from(parent.childNodes).every((node) => {
+                if (node.nodeType === Node.TEXT_NODE) {
+                  return !(node.textContent || '').trim();
                 }
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                  const el = node as HTMLElement;
+                  if (el.tagName === 'BR') return true;
+                  return el.getAttribute('data-ai-origin') === 'true' || isAiTextSpan(el);
+                }
+                return false;
+              });
+              if (onlyAiChildren) {
+                parent.setAttribute('data-ai-origin', 'true');
               }
             }
-          });
+          }
         }
       });
-    }
-  }, [hydrateSearchResultImages, normalizeContent]);
+    });
+  }, [doc.content, hydrateSearchResultImages, isPlaceholderHtml, normalizeContent]);
 
 
   useEffect(() => {
@@ -381,28 +383,62 @@ export function DocumentEditor() {
     return () => document.removeEventListener('keydown', handleKeyDown, true);
   }, [handleAiReview]);
 
-  const handleFormat = (command: string, value?: string) => {
-    document.execCommand(command, false, value);
-    editorRef.current?.focus();
-  };
-
-
-
   const handleModelChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     setSelectedModel(event.target.value);
   };
 
-  const handleSave = () => {
-    if (editorRef.current) {
-      const content = editorRef.current.innerHTML;
-      localStorage.setItem('documentContent', content);
+  const generateTitleFromContent = useCallback(
+    async (text: string, content: string) => {
+      if (isTitleGenerating) return;
+      if (titleGeneratedRef.current.has(doc.id)) return;
+      setIsTitleGenerating(true);
+      try {
+        const result = await generateWithOpenAI('title', text, selectedModel);
+        if (result.ok) {
+          const cleaned = result.text.replace(/[\r\n]+/g, ' ').trim();
+          if (cleaned) {
+            onSave(doc.id, content, cleaned);
+            titleGeneratedRef.current.add(doc.id);
+          }
+        }
+      } finally {
+        setIsTitleGenerating(false);
+      }
+    },
+    [doc.id, isTitleGenerating, onSave, selectedModel]
+  );
 
+  const persistDocument = (showNotification: boolean) => {
+    if (!editorRef.current) return;
+
+    const rawContent = editorRef.current.innerHTML;
+    const textContent = (editorRef.current.textContent || '').replace(/\s+/g, ' ').trim();
+    const isPlaceholder = textContent === 'Start writing...';
+    const content = isPlaceholder ? '' : rawContent;
+    const title = !textContent || isPlaceholder ? 'Untitled' : doc.title || 'Untitled';
+
+    onSave(doc.id, content, title);
+
+    if (!isPlaceholder && textContent && doc.title === 'Untitled') {
+      generateTitleFromContent(textContent, content);
+    }
+
+    if (showNotification) {
       const notification = document.createElement('div');
       notification.textContent = 'Document saved!';
       notification.className = 'fixed top-4 right-4 bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg z-50';
       document.body.appendChild(notification);
       setTimeout(() => notification.remove(), 2000);
     }
+  };
+
+  const handleSave = () => {
+    persistDocument(true);
+  };
+
+  const handleBack = () => {
+    persistDocument(false);
+    onBack();
   };
 
   const checkClickInSelection = (x: number, y: number): boolean => {
@@ -1103,11 +1139,61 @@ export function DocumentEditor() {
     if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
       const isPrintable = e.key !== 'Enter' && e.key !== 'Tab' && e.key !== 'Escape';
       if (isPrintable) {
+        if (e.key === ' ') {
+          const selection = window.getSelection();
+          if (selection && selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0);
+            if (range.collapsed) {
+              const block = getClosestBlock(range.startContainer);
+              if (block) {
+                const trigger = getListTrigger(block, range);
+                if (trigger) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  removeRangeFromBlockStart(block, range);
+                  document.execCommand(trigger === 'ordered' ? 'insertOrderedList' : 'insertUnorderedList');
+                  return;
+                }
+              }
+            }
+          }
+        }
         e.preventDefault();
         e.stopPropagation();
         insertStyledText(e.key);
         return;
       }
+    }
+  };
+
+  const getClosestBlock = (node: Node): HTMLElement | null => {
+    const element = node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+    if (!element) return null;
+    return element.closest('p, div, li, h1, h2, h3, h4, h5, h6, blockquote') as HTMLElement | null;
+  };
+
+  const getListTrigger = (block: HTMLElement, range: Range): 'unordered' | 'ordered' | null => {
+    const probe = range.cloneRange();
+    probe.selectNodeContents(block);
+    probe.setEnd(range.endContainer, range.endOffset);
+    const rawText = (probe.toString() || '').replace(/\u00A0/g, ' ').trim();
+    if (rawText === '-' || rawText === '*') return 'unordered';
+    if (/^\d+\.$/.test(rawText)) return 'ordered';
+    return null;
+  };
+
+  const removeRangeFromBlockStart = (block: HTMLElement, range: Range) => {
+    const cleanup = range.cloneRange();
+    cleanup.selectNodeContents(block);
+    cleanup.setEnd(range.endContainer, range.endOffset);
+    cleanup.deleteContents();
+    const selection = window.getSelection();
+    if (selection) {
+      const newRange = document.createRange();
+      newRange.selectNodeContents(block);
+      newRange.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(newRange);
     }
   };
 
@@ -1262,35 +1348,44 @@ export function DocumentEditor() {
   return (
     <div className="w-full min-h-screen">
       <div className="sticky top-0 z-10 bg-white border-b border-gray-200 px-2 py-2">
-        <div className="w-full mx-auto flex gap-0.5 items-center text-gray-400">
-          <button onClick={() => handleFormat('bold')} className="p-1.5 hover:text-gray-700 transition-colors" title="Bold (Ctrl/Cmd+B)"><Bold className="w-4 h-4" /></button>
-          <button onClick={() => handleFormat('italic')} className="p-1.5 hover:text-gray-700 transition-colors" title="Italic (Ctrl/Cmd+I)"><Italic className="w-4 h-4" /></button>
-          <button onClick={() => handleFormat('underline')} className="p-1.5 hover:text-gray-700 transition-colors" title="Underline (Ctrl/Cmd+U)"><Underline className="w-4 h-4" /></button>
-          <div className="w-3" />
-          <button onClick={() => handleFormat('insertUnorderedList')} className="p-1.5 hover:text-gray-700 transition-colors" title="Bullet List"><List className="w-4 h-4" style={{ transform: 'scale(1.1)' }} /></button>
-          <button onClick={() => handleFormat('insertOrderedList')} className="p-1.5 hover:text-gray-700 transition-colors" title="Numbered List"><ListOrdered className="w-4 h-4" style={{ transform: 'scale(1.1)' }} /></button>
-          <button onClick={() => handleFormat('insertOrderedList')} className="p-1.5 hover:text-gray-700 transition-colors" title="Numbered List"><ListOrdered className="w-4 h-4" style={{ transform: 'scale(1.1)' }} /></button>
-          <div className="w-3" />
-
-          <button
-            onClick={() => setShowAiText((prev: boolean) => !prev)}
-            className={`p-1.5 hover:text-gray-700 transition-colors ${!showAiText ? 'text-gray-700 bg-gray-100 rounded' : ''}`}
-            title={showAiText ? "Hide AI Text" : "Show AI Text"}
-          >
-            {showAiText ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-          </button>
-          <div className="w-3" />
-
-          <button type="button" className="p-1.5 hover:text-gray-700 transition-colors disabled:opacity-50" title="AI Review (Cmd+Enter)" disabled={aiLoading} aria-label="AI Review" onClick={handleAiReview}>
-            {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : <Sparkles className="w-4 h-4" aria-hidden />}
-          </button>
-          <div className="ml-2 flex items-center gap-2">
-            <label htmlFor="model-select" className="text-xs text-gray-500">Model</label>
-            <select id="model-select" value={OPENAI_MODEL_OPTIONS.includes(selectedModel) ? selectedModel : OPENAI_MODEL_OPTIONS[0]} onChange={handleModelChange} className="text-xs border border-gray-200 rounded px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" aria-label="Select AI model">
-              {OPENAI_MODEL_OPTIONS.map((modelId) => (<option key={modelId} value={modelId}>{modelId}</option>))}
-            </select>
+        <div className="w-full mx-auto flex items-center justify-between text-gray-400">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={handleBack}
+              className="px-2 py-1 text-xs text-gray-600 hover:text-gray-900 transition-colors"
+            >
+              Documents
+            </button>
+            <span className="text-xs text-gray-300">/</span>
+            <span className="text-xs text-gray-500 truncate max-w-[220px]">
+              {doc.title || 'Untitled'}
+            </span>
           </div>
 
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowAiText((prev: boolean) => !prev)}
+              className={`p-1.5 hover:text-gray-700 transition-colors ${!showAiText ? 'text-gray-700 bg-gray-100 rounded' : ''}`}
+              title={showAiText ? "Hide AI Text" : "Show AI Text"}
+            >
+              {showAiText ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+            </button>
+
+            <select
+              id="model-select"
+              value={OPENAI_MODEL_OPTIONS.includes(selectedModel) ? selectedModel : OPENAI_MODEL_OPTIONS[0]}
+              onChange={handleModelChange}
+              className="text-xs border border-gray-200 rounded px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+              aria-label="Select AI model"
+            >
+              {OPENAI_MODEL_OPTIONS.map((modelId) => (<option key={modelId} value={modelId}>{modelId}</option>))}
+            </select>
+
+            <button type="button" className="p-1.5 hover:text-gray-700 transition-colors disabled:opacity-50" title="AI Review (Cmd+Enter)" disabled={aiLoading} aria-label="AI Review" onClick={handleAiReview}>
+              {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : <Sparkles className="w-4 h-4" aria-hidden />}
+            </button>
+          </div>
         </div>
       </div>
 

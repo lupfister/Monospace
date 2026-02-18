@@ -130,7 +130,7 @@ const createAiOutputToggle = (): HTMLParagraphElement => {
     toggle.style.lineHeight = '1.5';
     toggle.style.display = 'inline-flex';
     toggle.style.alignItems = 'center';
-    toggle.style.gap = '4px';
+    toggle.style.gap = '12px';
     toggle.style.cursor = 'pointer';
     toggle.style.userSelect = 'none';
     toggle.style.color = '#6e6e6e';
@@ -200,13 +200,12 @@ const createAiOutputToggle = (): HTMLParagraphElement => {
 const VIEWED_SOURCES_HEADER_ATTR = 'data-viewed-sources-header';
 const VIEWED_SOURCES_CARET_ATTR = 'data-viewed-sources-caret';
 const VIEWED_SOURCES_TEXT_REGEX = /^Viewed \d+ sources?/i;
-const VIEWED_SOURCES_ICON_STATE_ATTR = 'data-viewed-sources-icon-state';
 const VIEWED_SOURCES_ICON_MORPH_ATTR = 'data-viewed-sources-morph';
-const VIEWED_SOURCES_ICON_MAGNIFIER_ATTR = 'data-viewed-sources-magnifier-target';
-const VIEWED_SOURCES_ICON_LINE_ATTR = 'data-viewed-sources-line-target';
-type ViewedSourcesIconState = 'magnifier' | 'line';
+const VIEWED_SOURCES_ICON_MAGNIFIER_ATTR = 'data-viewed-sources-magnifier';
+const VIEWED_SOURCES_ICON_LINE_ATTR = 'data-viewed-sources-line';
 const VIEWED_SOURCES_MORPH_SAMPLES = 36;
 const VIEWED_SOURCES_ANIMATION_DURATION = 220;
+type ViewedSourcesIconState = 'magnifier' | 'line';
 
 const samplePathPoints = (pathEl: SVGPathElement, samples: number) => {
     const total = pathEl.getTotalLength();
@@ -258,41 +257,42 @@ const animateViewedSourcesMorph = (
     morphPath.style.opacity = '1';
     requestAnimationFrame(step);
 };
-
 const setViewedSourcesIconState = (icon: HTMLElement, state: ViewedSourcesIconState) => {
+    const magnifierPath = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_MAGNIFIER_ATTR}]`);
+    const linePath = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_LINE_ATTR}]`);
     const morphPath = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_MORPH_ATTR}]`);
-    const targetPath = icon.querySelector<SVGPathElement>(
-        state === 'magnifier' ? `[${VIEWED_SOURCES_ICON_MAGNIFIER_ATTR}]` : `[${VIEWED_SOURCES_ICON_LINE_ATTR}]`
-    );
-    if (!morphPath || !targetPath) return;
-    morphPath.setAttribute('d', targetPath.getAttribute('d') ?? '');
+    if (!magnifierPath || !linePath) return;
+    const showMagnifier = state === 'magnifier';
+    magnifierPath.style.opacity = showMagnifier ? '1' : '0';
+    linePath.style.opacity = showMagnifier ? '0' : '1';
     icon.dataset.viewedSourcesIconState = state;
-    morphPath.style.opacity = '1';
+    if (morphPath) morphPath.style.opacity = '0';
 };
 
-const transitionViewedSourcesIcon = (
-    icon: HTMLElement,
-    targetState: ViewedSourcesIconState,
-    animate = true
-) => {
+const transitionViewedSourcesIcon = (icon: HTMLElement, targetState: ViewedSourcesIconState) => {
     const morphPath = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_MORPH_ATTR}]`);
-    const magnifierTarget = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_MAGNIFIER_ATTR}]`);
-    const lineTarget = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_LINE_ATTR}]`);
-    if (!morphPath || !magnifierTarget || !lineTarget) return;
+    const magnifierPath = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_MAGNIFIER_ATTR}]`);
+    const linePath = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_LINE_ATTR}]`);
+    if (!morphPath || !magnifierPath || !linePath) return;
 
     const currentState = (icon.dataset.viewedSourcesIconState as ViewedSourcesIconState) ?? 'magnifier';
-    if (!animate || currentState === targetState) {
+    if (currentState === targetState) {
         setViewedSourcesIconState(icon, targetState);
         return;
     }
 
-    const startPath = currentState === 'magnifier' ? magnifierTarget : lineTarget;
-    const endPath = targetState === 'magnifier' ? magnifierTarget : lineTarget;
+    const startPath = currentState === 'magnifier' ? magnifierPath : linePath;
+    const endPath = targetState === 'magnifier' ? magnifierPath : linePath;
     morphPath.setAttribute('d', startPath.getAttribute('d') ?? '');
+    magnifierPath.style.opacity = '0';
+    linePath.style.opacity = '0';
     animateViewedSourcesMorph(morphPath, startPath, endPath, VIEWED_SOURCES_ANIMATION_DURATION, () => {
         setViewedSourcesIconState(icon, targetState);
     });
 };
+
+const MAGNIFIER_PATH_D = 'M14 14L9.68198 9.68198M11 6.5C11 8.98528 8.98528 11 6.5 11C4.01472 11 2 8.98528 2 6.5C2 4.01472 4.01472 2 6.5 2C8.98528 2 11 4.01472 11 6.5Z';
+const LINE_PATH_D = 'M1 8h14';
 
 const createViewedSourcesIcon = (): HTMLElement => {
     const icon = document.createElement('span');
@@ -301,17 +301,28 @@ const createViewedSourcesIcon = (): HTMLElement => {
     icon.style.display = 'inline-flex';
     icon.style.alignItems = 'center';
     icon.style.justifyContent = 'center';
-    icon.style.width = '18px';
-    icon.style.height = '18px';
+    icon.style.width = '16px';
+    icon.style.height = '16px';
+    icon.style.lineHeight = '1';
     icon.style.userSelect = 'none';
     icon.style.cursor = 'pointer';
+    icon.style.color = '#6e6e6e';
+    icon.style.position = 'relative';
+    icon.style.transition = 'color 0.2s ease';
+    icon.style.outline = 'none';
+    icon.addEventListener('focus', () => {
+        icon.style.outline = 'none';
+    });
     icon.innerHTML = `
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path ${VIEWED_SOURCES_ICON_MORPH_ATTR} d="M7 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm4.5 6.5L13 13" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>
-            <path ${VIEWED_SOURCES_ICON_MAGNIFIER_ATTR} d="M7 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm4.5 6.5L13 13" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" opacity="0" pointer-events="none"/>
-            <path ${VIEWED_SOURCES_ICON_LINE_ATTR} d="M3 8h10" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" opacity="0" pointer-events="none"/>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="display: block;">
+            <path ${VIEWED_SOURCES_ICON_MORPH_ATTR} d="${MAGNIFIER_PATH_D}" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" opacity="0" pointer-events="none"/>
+            <path ${VIEWED_SOURCES_ICON_MAGNIFIER_ATTR} d="${MAGNIFIER_PATH_D}" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" opacity="1"/>
+            <path ${VIEWED_SOURCES_ICON_LINE_ATTR} d="${LINE_PATH_D}" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" opacity="0"/>
         </svg>
     `;
+    icon.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+    });
     return icon;
 };
 
@@ -330,7 +341,7 @@ const getInitialViewedSourcesState = (list: HTMLElement, fallback?: boolean): bo
 const attachViewedSourcesToggle = (icon: HTMLElement, list: HTMLElement, fallbackState?: boolean) => {
     if (!icon || !list) return;
 
-    const header = icon.closest('div');
+    const header = icon.closest(`[${VIEWED_SOURCES_HEADER_ATTR}]`) as HTMLElement | null;
     if (header) {
         header.dataset.viewedSourcesHeader = 'true';
     }
@@ -343,7 +354,11 @@ const attachViewedSourcesToggle = (icon: HTMLElement, list: HTMLElement, fallbac
         list.style.display = open ? 'block' : 'none';
         list.dataset.viewedSourcesOpen = open ? 'true' : 'false';
         icon.dataset.viewedSourcesOpen = open ? 'true' : 'false';
-        transitionViewedSourcesIcon(icon, open ? 'line' : 'magnifier', animate);
+        if (animate) {
+            transitionViewedSourcesIcon(icon, open ? 'line' : 'magnifier');
+        } else {
+            setViewedSourcesIconState(icon, open ? 'line' : 'magnifier');
+        }
     };
 
     if (icon.dataset.viewedSourcesAttached !== 'true') {
@@ -393,7 +408,7 @@ export const rehydrateViewedSourcesToggles = (root: HTMLElement | null) => {
     const datasetHeaders = Array.from(root.querySelectorAll<HTMLElement>(`[${VIEWED_SOURCES_HEADER_ATTR}]`));
     datasetHeaders.forEach(processHeader);
 
-    const fallbackHeaders = Array.from(root.querySelectorAll<HTMLElement>('div')).filter((header) => {
+    const fallbackHeaders = Array.from(root.querySelectorAll<HTMLElement>('div, p')).filter((header) => {
         if (processed.has(header)) return false;
         const text = (header.textContent || '').trim();
         if (!VIEWED_SOURCES_TEXT_REGEX.test(text)) return false;
@@ -759,14 +774,19 @@ export const buildSearchResultsBlock = async (
         sourcesContainer.dataset.aiOrigin = 'true';
 
         // Header
-        const headerDiv = document.createElement('div');
-        headerDiv.style.lineHeight = '1.5';
+        const headerPara = document.createElement('p');
+        headerPara.dataset.viewedSourcesHeader = 'true';
+        headerPara.style.lineHeight = '1.5';
+        headerPara.style.margin = '0';
+        headerPara.style.display = 'inline-flex';
+        headerPara.style.alignItems = 'center';
+        headerPara.style.gap = '12px';
 
         const icon = createViewedSourcesIcon();
-        icon.style.marginRight = '4px';
         const headerSpan = createAiTextSpan(`Viewed ${sourceCount} source${sourceCount === 1 ? '' : 's'}`);
-        headerDiv.appendChild(icon);
-        headerDiv.appendChild(headerSpan);
+        headerSpan.contentEditable = 'false';
+        headerPara.appendChild(icon);
+        headerPara.appendChild(headerSpan);
 
         // Sources list container (initially hidden)
         const listContainer = document.createElement('div');
@@ -797,7 +817,7 @@ export const buildSearchResultsBlock = async (
             }
         });
 
-        sourcesContainer.appendChild(headerDiv);
+        sourcesContainer.appendChild(headerPara);
         sourcesContainer.appendChild(listContainer);
 
         fragment.appendChild(sourcesContainer);

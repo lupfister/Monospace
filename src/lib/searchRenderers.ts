@@ -124,6 +124,7 @@ const createAiOutputSpacer = (): HTMLParagraphElement => {
 const createAiOutputToggle = (): HTMLParagraphElement => {
     const toggle = document.createElement('p');
     toggle.dataset.aiOutputToggle = 'true';
+    toggle.dataset.aiUi = 'true';
     toggle.contentEditable = 'true';
     toggle.setAttribute('role', 'button');
     toggle.setAttribute('aria-expanded', 'true');
@@ -138,9 +139,12 @@ const createAiOutputToggle = (): HTMLParagraphElement => {
     toggle.style.fontSize = '14px';
     toggle.style.fontWeight = '350';
     toggle.style.fontVariationSettings = '"wght" 350';
+    toggle.style.margin = '0';
+    toggle.style.padding = '0';
 
     const icon = document.createElement('span');
     icon.dataset.aiOutputIcon = 'true';
+    icon.dataset.aiUi = 'true';
     icon.contentEditable = 'false';
     icon.innerHTML = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="display: inline; vertical-align: middle;">
       <path data-ai-output-morph="true" d="M1 13C3 14.0044 6.8 13.6159 10 10C14 5.48013 11 2 8 2C5 2 2 5.48013 6 10C9.2 13.6159 13 14.0044 15 13" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/>
@@ -179,6 +183,7 @@ const createAiOutputToggle = (): HTMLParagraphElement => {
 
     const label = document.createElement('span');
     label.dataset.aiOutputLabel = 'true';
+    label.dataset.aiUi = 'true';
     label.textContent = 'Hide AI output';
     label.contentEditable = 'false';
 

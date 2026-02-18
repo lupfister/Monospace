@@ -21,11 +21,13 @@ export const applyAiHiddenState = (root: HTMLElement) => {
   root
     .querySelectorAll('[data-ai-text="true"], [data-ai-question="true"], [data-ai-origin="true"], span[role="link"]')
     .forEach((el) => {
+      if ((el as HTMLElement).closest('[data-ai-ui="true"]')) return;
       aiNodes.add(el as HTMLElement);
     });
 
   root.querySelectorAll('span').forEach((span) => {
     const el = span as HTMLElement;
+    if (el.closest('[data-ai-ui="true"]')) return;
     if (isAiTextSpan(el)) {
       aiNodes.add(el);
     }
@@ -56,6 +58,7 @@ export const applyAiHiddenState = (root: HTMLElement) => {
   };
 
   root.querySelectorAll('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]').forEach((el) => {
+    if ((el as HTMLElement).closest('[data-ai-ui="true"]')) return;
     wrapAiTextNodes(el as HTMLElement);
   });
 

@@ -53,6 +53,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
   const [selectedModel, setSelectedModel] = useState('gpt-4o-mini');
   const [isTitleGenerating, setIsTitleGenerating] = useState(false);
   const titleGeneratedRef = useRef<Set<string>>(new Set());
+  const VIEWED_SOURCES_HEADER_SELECTOR = '[data-viewed-sources-header="true"]';
 
   const getAiOutputContainer = (node: Node | null): HTMLElement | null => {
     if (!node) return null;
@@ -87,12 +88,55 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       clearAiHiddenState(body);
     }
 
+    const toggle = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
+    const spacer = container.querySelector('[data-ai-output-spacer="true"]') as HTMLElement | null;
+    const header = body.querySelector(VIEWED_SOURCES_HEADER_SELECTOR) as HTMLElement | null;
+    const sourcesContainer = header?.parentElement ?? null;
+    const hasReplacementToggle = container.getAttribute('data-ai-toggle-replaces-sources') === 'true';
+
+    if (collapsed) {
+      if (header) {
+        container.setAttribute('data-ai-toggle-replaces-sources', 'true');
+      }
+      if (header) {
+        header.style.display = 'none';
+      }
+      if (toggle && sourcesContainer) {
+        sourcesContainer.parentElement?.insertBefore(toggle, sourcesContainer);
+        toggle.style.display = 'inline-flex';
+      } else if (toggle) {
+        toggle.style.display = 'inline-flex';
+      }
+      if (spacer) spacer.style.display = 'none';
+    } else {
+      if (hasReplacementToggle) {
+        if (header) header.style.display = 'inline-flex';
+        if (toggle) toggle.style.display = 'inline-flex';
+        if (spacer) spacer.style.display = 'none';
+      } else {
+        if (header) {
+          header.style.display = 'inline-flex';
+        }
+        if (toggle) {
+          container.insertBefore(toggle, container.firstChild);
+          toggle.style.display = 'none';
+        }
+      }
+      if (!hasReplacementToggle && spacer) spacer.style.display = '';
+    }
+
     const label = container.querySelector('[data-ai-output-label="true"]') as HTMLElement | null;
     if (label) {
       label.textContent = collapsed ? 'Show full AI output' : 'Hide AI output';
+    } else if (toggle) {
+      const fallbackLabel = document.createElement('span');
+      fallbackLabel.dataset.aiOutputLabel = 'true';
+      fallbackLabel.dataset.aiUi = 'true';
+      fallbackLabel.textContent = collapsed ? 'Show full AI output' : 'Hide AI output';
+      fallbackLabel.contentEditable = 'false';
+      toggle.appendChild(fallbackLabel);
     }
 
-    const toggle = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
     if (toggle) {
       toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     }
@@ -393,6 +437,21 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       hydrateSearchResultImages(editorRef.current);
       normalizeContent();
       rehydrateViewedSourcesToggles(editorRef.current);
+
+      editorRef.current.querySelectorAll<HTMLElement>('[data-ai-output-toggle="true"]').forEach((toggle) => {
+        toggle.dataset.aiUi = 'true';
+        const icon = toggle.querySelector<HTMLElement>('[data-ai-output-icon="true"]');
+        if (icon) icon.dataset.aiUi = 'true';
+        const label = toggle.querySelector<HTMLElement>('[data-ai-output-label="true"]');
+        if (label) {
+          label.dataset.aiUi = 'true';
+          if (!label.textContent || label.textContent.trim().length === 0) {
+            const container = toggle.closest('[data-ai-output="true"]') as HTMLElement | null;
+            const collapsed = container?.getAttribute('data-ai-output-collapsed') === 'true';
+            label.textContent = collapsed ? 'Show full AI output' : 'Hide AI output';
+          }
+        }
+      });
 
       // Tag existing AI text
       editorRef.current.querySelectorAll('[data-ai-text="true"]').forEach((el) => {

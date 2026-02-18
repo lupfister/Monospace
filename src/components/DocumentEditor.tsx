@@ -1784,11 +1784,6 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
             display: inline;
           }
 
-          [data-ai-output-collapsed="true"]:not([data-ai-output-animating="true"]) [data-ai-highlighted="true"],
-          [data-ai-output-collapsed="true"]:not([data-ai-output-animating="true"]) [data-human-text="true"] {
-            display: block;
-          }
-
           [data-ai-linebreak="true"] {
             display: block;
             white-space: pre-wrap;

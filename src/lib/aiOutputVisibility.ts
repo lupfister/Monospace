@@ -1,6 +1,8 @@
 import { isAiTextSpan, isHumanTextSpan } from './textStyles';
 
 const AI_HIDE_DURATION = 300; // ms
+const AI_HIDE_SCALE = 0.7;
+const AI_HIDE_SHIFT_Y = -6; // px
 
 const removeAttributeFromAll = (root: HTMLElement, selector: string, attr: string) => {
   root.querySelectorAll(selector).forEach((el) => {
@@ -8,16 +10,39 @@ const removeAttributeFromAll = (root: HTMLElement, selector: string, attr: strin
   });
 };
 
-export const clearAiHiddenState = (root: HTMLElement) => {
+export const clearAiHiddenState = (root: HTMLElement, options: { preserveLinebreaks?: boolean } = {}) => {
   removeAttributeFromAll(root, '[data-ai-hidden="true"]', 'data-ai-hidden');
   removeAttributeFromAll(root, '[data-ai-contains-highlight="true"]', 'data-ai-contains-highlight');
   removeAttributeFromAll(root, '[data-ai-show-highlight="true"]', 'data-ai-show-highlight');
-  root.querySelectorAll('[data-ai-linebreak="true"]').forEach((linebreak) => linebreak.remove());
+  if (!options.preserveLinebreaks) {
+    root.querySelectorAll('[data-ai-linebreak="true"]').forEach((linebreak) => linebreak.remove());
+  }
   root.querySelectorAll('[data-ai-highlight-clone="true"]').forEach((clone) => clone.remove());
 };
 
-export const applyAiHiddenState = (root: HTMLElement) => {
-  clearAiHiddenState(root);
+const ensureAiLinebreaks = (root: HTMLElement) => {
+  const visibleUnits = Array.from(root.querySelectorAll('[data-ai-highlighted="true"], [data-human-text="true"]')) as HTMLElement[];
+  visibleUnits.forEach((el, index) => {
+    if (index === visibleUnits.length - 1) return;
+    const next = el.nextSibling as HTMLElement | null;
+    if (next && next.nodeType === Node.ELEMENT_NODE && (next as HTMLElement).getAttribute('data-ai-linebreak') === 'true') {
+      return;
+    }
+    const spacer = document.createElement('span');
+    spacer.setAttribute('data-ai-linebreak', 'true');
+    spacer.style.display = 'block';
+    spacer.style.whiteSpace = 'pre-wrap';
+    const computed = window.getComputedStyle(el);
+    spacer.style.fontFamily = computed.fontFamily;
+    spacer.style.fontSize = computed.fontSize;
+    spacer.style.lineHeight = computed.lineHeight;
+    spacer.textContent = '\n';
+    el.parentNode?.insertBefore(spacer, el.nextSibling);
+  });
+};
+
+export const applyAiHiddenState = (root: HTMLElement, options: { preserveLinebreaks?: boolean } = {}) => {
+  clearAiHiddenState(root, options);
 
   const aiNodes = new Set<HTMLElement>();
   root
@@ -116,24 +141,7 @@ export const applyAiHiddenState = (root: HTMLElement) => {
     block.setAttribute('data-ai-show-highlight', 'true');
   });
 
-  const visibleUnits = Array.from(root.querySelectorAll('[data-ai-highlighted="true"], [data-human-text="true"]')) as HTMLElement[];
-  visibleUnits.forEach((el, index) => {
-    if (index === visibleUnits.length - 1) return;
-    const next = el.nextSibling as HTMLElement | null;
-    if (next && next.nodeType === Node.ELEMENT_NODE && (next as HTMLElement).getAttribute('data-ai-linebreak') === 'true') {
-      return;
-    }
-    const spacer = document.createElement('span');
-    spacer.setAttribute('data-ai-linebreak', 'true');
-    spacer.style.display = 'block';
-    spacer.style.whiteSpace = 'pre-wrap';
-    const computed = window.getComputedStyle(el);
-    spacer.style.fontFamily = computed.fontFamily;
-    spacer.style.fontSize = computed.fontSize;
-    spacer.style.lineHeight = computed.lineHeight;
-    spacer.textContent = '\n';
-    el.parentNode?.insertBefore(spacer, el.nextSibling);
-  });
+  ensureAiLinebreaks(root);
 };
 
 /** Check whether an element (or its descendants) contains persistent content. */
@@ -148,12 +156,30 @@ const hasPersistentContent = (el: HTMLElement): boolean =>
 const ANIM_PROPS = [
   'height', 'overflow', 'opacity', 'filter', 'transition',
   'will-change', 'margin-top', 'margin-bottom',
-  'padding-top', 'padding-bottom', 'min-height',
+  'padding-top', 'padding-bottom', 'min-height', 'transform',
+  'position', 'top', 'left', 'width', 'pointer-events',
 ] as const;
 
 /** Clean up inline animation styles from an element. */
 const clearAnimStyles = (el: HTMLElement) => {
   for (const prop of ANIM_PROPS) el.style.removeProperty(prop);
+};
+
+const createAnimationClone = (el: HTMLElement, rect: DOMRect) => {
+  const clone = el.cloneNode(true) as HTMLElement;
+  clone.setAttribute('data-ai-anim-clone', 'true');
+  clone.contentEditable = 'false';
+  clone.style.position = 'fixed';
+  clone.style.left = `${rect.left}px`;
+  clone.style.top = `${rect.top}px`;
+  clone.style.width = `${rect.width}px`;
+  clone.style.height = `${rect.height}px`;
+  clone.style.margin = '0';
+  clone.style.pointerEvents = 'none';
+  clone.style.transformOrigin = 'top';
+  clone.style.zIndex = '1000';
+  document.body.appendChild(clone);
+  return clone;
 };
 
 /**
@@ -172,8 +198,13 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
   const children = Array.from(body.children) as HTMLElement[];
 
   const toHide: HTMLElement[] = [];
+  const persistent: HTMLElement[] = [];
   for (const child of children) {
-    if (!hasPersistentContent(child)) toHide.push(child);
+    if (!hasPersistentContent(child)) {
+      toHide.push(child);
+    } else {
+      persistent.push(child);
+    }
   }
 
   if (toHide.length === 0) {
@@ -183,13 +214,35 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
   }
 
   // ── Measure ──────────────────────────────────────────────────────
+  ensureAiLinebreaks(body);
   const startHeight = body.offsetHeight;
+  const persistentStart = new Map<HTMLElement, DOMRect>();
+  const toHideRects = new Map<HTMLElement, DOMRect>();
+  for (const el of persistent) persistentStart.set(el, el.getBoundingClientRect());
+  for (const el of toHide) toHideRects.set(el, el.getBoundingClientRect());
 
-  // Temporarily collapse AI elements to measure target body height
-  for (const el of toHide) el.style.display = 'none';
-  void body.offsetHeight;                       // force reflow
+  const clones: HTMLElement[] = [];
+  for (const el of toHide) {
+    const rect = toHideRects.get(el);
+    if (!rect) continue;
+    clones.push(createAnimationClone(el, rect));
+  }
+
+  applyAiHiddenState(body, { preserveLinebreaks: true });
   const targetHeight = body.offsetHeight;
-  for (const el of toHide) el.style.removeProperty('display');
+  const persistentEnd = new Map<HTMLElement, DOMRect>();
+  for (const el of persistent) persistentEnd.set(el, el.getBoundingClientRect());
+  const persistentDeltas = new Map<HTMLElement, { x: number; y: number }>();
+  for (const el of persistent) {
+    const startRect = persistentStart.get(el);
+    const endRect = persistentEnd.get(el);
+    if (!startRect || !endRect) continue;
+    const dx = startRect.left - endRect.left;
+    const dy = startRect.top - endRect.top;
+    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+      persistentDeltas.set(el, { x: dx, y: dy });
+    }
+  }
 
   // ── Lock starting state ──────────────────────────────────────────
   // Body container — controls external layout
@@ -197,11 +250,11 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
   body.style.overflow = 'hidden';
   body.style.willChange = 'height';
 
-  // Individual AI elements — controls visual disappearance
-  for (const el of toHide) {
-    el.style.opacity = '1';
-    el.style.filter = 'blur(0px)';
-    el.style.willChange = 'opacity, filter';
+  for (const el of persistent) {
+    const delta = persistentDeltas.get(el);
+    if (!delta) continue;
+    el.style.transform = `translate(${delta.x}px, ${delta.y}px)`;
+    el.style.willChange = 'transform';
   }
 
   void body.offsetHeight;                       // commit starting values
@@ -210,23 +263,33 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
   const dur = AI_HIDE_DURATION;
   const ease = 'cubic-bezier(0.4, 0, 0.2, 1)';
 
-  body.style.transition = `height ${dur}ms ${ease}`;
-  body.style.height = targetHeight + 'px';
+  requestAnimationFrame(() => {
+    body.style.transition = `height ${dur}ms ${ease}`;
+    body.style.height = targetHeight + 'px';
 
-  for (const el of toHide) {
-    el.style.transition = [
-      `opacity ${Math.round(dur * 0.55)}ms ease-out`,
-      `filter ${dur}ms ease-out`,
-    ].join(', ');
-    el.style.opacity = '0';
-    el.style.filter = 'blur(4px)';
-  }
+    for (const el of persistent) {
+      if (!persistentDeltas.has(el)) continue;
+      el.style.transition = `transform ${dur}ms ${ease}`;
+      el.style.transform = 'translate(0px, 0px)';
+    }
+
+    clones.forEach((clone) => {
+      clone.style.transition = [
+        `opacity ${Math.round(dur * 0.55)}ms ease-out`,
+        `filter ${dur}ms ease-out`,
+        `transform ${dur}ms ease-out`,
+      ].join(', ');
+      clone.style.opacity = '0';
+      clone.style.filter = 'blur(4px)';
+      clone.style.transform = `scaleY(${AI_HIDE_SCALE}) translateY(${AI_HIDE_SHIFT_Y}px)`;
+    });
+  });
 
   // ── Cleanup ──────────────────────────────────────────────────────
   setTimeout(() => {
     clearAnimStyles(body);
-    for (const el of toHide) clearAnimStyles(el);
-    applyAiHiddenState(body);
+    for (const el of persistent) clearAnimStyles(el);
+    clones.forEach((clone) => clone.remove());
     onComplete?.();
   }, dur + 20);
 };
@@ -244,6 +307,7 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
   const children = Array.from(body.children) as HTMLElement[];
 
   const toShow: HTMLElement[] = [];
+  const persistent: HTMLElement[] = [];
   for (const child of children) {
     if (child.getAttribute('data-ai-ui') === 'true') continue;
     if (child.getAttribute('data-ai-output-toggle') === 'true') continue;
@@ -251,7 +315,11 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
       child.getAttribute('data-ai-text') === 'true' ||
       child.getAttribute('data-ai-origin') === 'true' ||
       child.getAttribute('data-ai-question') === 'true';
-    if (isAi) toShow.push(child);
+    if (isAi) {
+      toShow.push(child);
+    } else if (hasPersistentContent(child)) {
+      persistent.push(child);
+    }
   }
 
   if (toShow.length === 0) {
@@ -260,30 +328,45 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
   }
 
   // ── Measure ──────────────────────────────────────────────────────
-  const targetHeight = body.offsetHeight;       // full height with AI visible
-
-  // Calculate starting height (without AI elements)
-  for (const el of toShow) el.style.display = 'none';
-  void body.offsetHeight;
   const startHeight = body.offsetHeight;
-  for (const el of toShow) el.style.removeProperty('display');
+  const persistentStart = new Map<HTMLElement, DOMRect>();
+  for (const el of persistent) persistentStart.set(el, el.getBoundingClientRect());
 
-  // Measure each element's natural height
-  const heights = new Map<HTMLElement, number>();
-  for (const el of toShow) heights.set(el, el.offsetHeight);
+  clearAiHiddenState(body, { preserveLinebreaks: true });
+
+  const targetHeight = body.offsetHeight;
+  const persistentEnd = new Map<HTMLElement, DOMRect>();
+  for (const el of persistent) persistentEnd.set(el, el.getBoundingClientRect());
+  const persistentDeltas = new Map<HTMLElement, { x: number; y: number }>();
+  for (const el of persistent) {
+    const startRect = persistentStart.get(el);
+    const endRect = persistentEnd.get(el);
+    if (!startRect || !endRect) continue;
+    const dx = startRect.left - endRect.left;
+    const dy = startRect.top - endRect.top;
+    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+      persistentDeltas.set(el, { x: dx, y: dy });
+    }
+  }
 
   // ── Lock starting state ──────────────────────────────────────────
   body.style.height = startHeight + 'px';
-  body.style.overflow = 'hidden';
+  body.style.overflow = 'visible';
   body.style.willChange = 'height';
 
+  for (const el of persistent) {
+    const delta = persistentDeltas.get(el);
+    if (!delta) continue;
+    el.style.transform = `translate(${delta.x}px, ${delta.y}px)`;
+    el.style.willChange = 'transform';
+  }
+
   for (const el of toShow) {
-    el.style.height = '0px';
-    el.style.overflow = 'hidden';
     el.style.opacity = '0';
     el.style.filter = 'blur(4px)';
-    el.style.willChange = 'height, opacity, filter';
-    el.style.minHeight = '0px';
+    el.style.transform = `scaleY(${AI_HIDE_SCALE}) translateY(${AI_HIDE_SHIFT_Y}px)`;
+    el.style.transformOrigin = 'top';
+    el.style.willChange = 'opacity, filter, transform';
   }
 
   void body.offsetHeight;                       // commit starting values
@@ -292,24 +375,36 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
   const dur = AI_HIDE_DURATION;
   const ease = 'cubic-bezier(0.4, 0, 0.2, 1)';
 
-  body.style.transition = `height ${dur}ms ${ease}`;
-  body.style.height = targetHeight + 'px';
+  requestAnimationFrame(() => {
+    body.style.transition = `height ${dur}ms ${ease}`;
+    body.style.height = targetHeight + 'px';
 
-  for (const el of toShow) {
-    el.style.transition = [
-      `height ${dur}ms ${ease}`,
-      `opacity ${Math.round(dur * 0.7)}ms ease-in ${Math.round(dur * 0.15)}ms`,
-      `filter ${dur}ms ease-in`,
-    ].join(', ');
-    el.style.height = (heights.get(el) ?? 0) + 'px';
-    el.style.opacity = '1';
-    el.style.filter = 'blur(0px)';
-  }
+    for (const el of persistent) {
+      if (!persistentDeltas.has(el)) continue;
+      el.style.transition = `transform ${dur}ms ${ease}`;
+      el.style.transform = 'translate(0px, 0px)';
+    }
+
+    for (const el of toShow) {
+      el.style.transition = [
+        `opacity ${Math.round(dur * 0.7)}ms ease-in ${Math.round(dur * 0.15)}ms`,
+        `filter ${dur}ms ease-in`,
+        `transform ${dur}ms ease-in`,
+      ].join(', ');
+      el.style.opacity = '1';
+      el.style.filter = 'blur(0px)';
+      el.style.transform = 'scaleY(1) translateY(0px)';
+    }
+  });
 
   // ── Cleanup ──────────────────────────────────────────────────────
   setTimeout(() => {
-    clearAnimStyles(body);
     for (const el of toShow) clearAnimStyles(el);
-    onComplete?.();
+    requestAnimationFrame(() => {
+      clearAnimStyles(body);
+      for (const el of persistent) clearAnimStyles(el);
+      clearAiHiddenState(body);
+      onComplete?.();
+    });
   }, dur + 20);
 };

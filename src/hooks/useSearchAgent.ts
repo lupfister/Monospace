@@ -4,6 +4,7 @@ import { extractDocumentContext } from '../lib/contextExtractor';
 import {
     buildSearchResultsBlock,
     createLoadingShimmer,
+    rehydrateViewedSourcesToggles,
     updateShimmerPhase,
     type LoadingPhase
 } from '../lib/searchRenderers';
@@ -135,6 +136,7 @@ export function useSearchAgent(
                 shimmerRef.current = null;
 
                 hydrateSearchResultImages(editorRef.current);
+                rehydrateViewedSourcesToggles(editorRef.current);
                 onResultsInserted?.(resultsBlock);
             } else {
                 // No results - remove shimmer, set error

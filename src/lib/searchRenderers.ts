@@ -142,11 +142,40 @@ const createAiOutputToggle = (): HTMLParagraphElement => {
     const icon = document.createElement('span');
     icon.dataset.aiOutputIcon = 'true';
     icon.contentEditable = 'false';
-    icon.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: inline; vertical-align: middle;"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.13-3.36L23 10"></path><path d="M20.49 15a9 9 0 0 1-14.13 3.36L1 14"></path></svg>`;
+    icon.innerHTML = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="display: inline; vertical-align: middle;">
+      <path data-ai-output-morph="true" d="M1 13C3 14.0044 6.8 13.6159 10 10C14 5.48013 11 2 8 2C5 2 2 5.48013 6 10C9.2 13.6159 13 14.0044 15 13" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/>
+      <path data-ai-output-loop-target="true" d="M1 13C3 14.0044 6.8 13.6159 10 10C14 5.48013 11 2 8 2C5 2 2 5.48013 6 10C9.2 13.6159 13 14.0044 15 13" stroke="currentColor" stroke-linecap="round" stroke-width="1.5" opacity="0" pointer-events="none"/>
+      <path data-ai-output-line-target="true" d="M1 8 L15 8" stroke="currentColor" stroke-linecap="round" stroke-width="1.5" opacity="0" pointer-events="none"/>
+    </svg>`;
     icon.style.display = 'inline';
     icon.style.transition = 'transform 0.2s';
     icon.style.color = '#6e6e6e';
-    icon.style.transform = 'rotate(90deg)';
+    icon.style.transform = 'rotate(0deg)';
+    icon.style.position = 'relative';
+    icon.style.display = 'inline-flex';
+    icon.style.alignItems = 'center';
+    icon.style.justifyContent = 'center';
+    const morphPath = icon.querySelector('[data-ai-output-morph="true"]') as SVGPathElement | null;
+    const loopTarget = icon.querySelector('[data-ai-output-loop-target="true"]') as SVGPathElement | null;
+    const lineTarget = icon.querySelector('[data-ai-output-line-target="true"]') as SVGPathElement | null;
+    const ensureStrokeWidth = (path: SVGPathElement | null) => {
+      if (!path) return;
+      path.setAttribute('stroke-width', '1.5');
+      path.style.strokeWidth = '1.5';
+    };
+    ensureStrokeWidth(morphPath);
+    ensureStrokeWidth(loopTarget);
+    ensureStrokeWidth(lineTarget);
+    if (loopTarget) {
+      loopTarget.style.opacity = '0';
+    }
+    if (lineTarget) {
+      lineTarget.style.opacity = '1';
+    }
+    if (morphPath) {
+      morphPath.style.opacity = '0';
+    }
+    icon.dataset.aiOutputState = 'line';
 
     const label = document.createElement('span');
     label.dataset.aiOutputLabel = 'true';
@@ -166,6 +195,95 @@ const createAiOutputToggle = (): HTMLParagraphElement => {
     toggle.appendChild(caret);
 
     return toggle;
+};
+
+const VIEWED_SOURCES_HEADER_ATTR = 'data-viewed-sources-header';
+const VIEWED_SOURCES_CARET_ATTR = 'data-viewed-sources-caret';
+const VIEWED_SOURCES_TEXT_REGEX = /^Viewed \d+ sources?/i;
+
+const getInitialViewedSourcesState = (list: HTMLElement, fallback?: boolean): boolean => {
+    if (typeof fallback === 'boolean') {
+        return fallback;
+    }
+    const datasetState = list.dataset.viewedSourcesOpen;
+    if (datasetState === 'true') return true;
+    if (datasetState === 'false') return false;
+    const explicit = (list.style.display || '').trim();
+    if (explicit && explicit !== 'none') return true;
+    return false;
+};
+
+const attachViewedSourcesToggle = (caret: HTMLElement, list: HTMLElement, fallbackState?: boolean) => {
+    if (!caret || !list) return;
+
+    const header = caret.closest('div');
+    if (header) {
+        header.dataset.viewedSourcesHeader = 'true';
+    }
+    caret.dataset.viewedSourcesCaret = 'true';
+    list.dataset.viewedSourcesList = 'true';
+
+    let isOpen = getInitialViewedSourcesState(list, fallbackState);
+    const updateState = (open: boolean) => {
+        isOpen = open;
+        list.style.display = open ? 'block' : 'none';
+        caret.style.transform = open ? 'rotate(90deg)' : 'rotate(0deg)';
+        list.dataset.viewedSourcesOpen = open ? 'true' : 'false';
+        caret.dataset.viewedSourcesOpen = open ? 'true' : 'false';
+    };
+
+    caret.style.cursor = 'pointer';
+    if (!caret.style.transition) {
+        caret.style.transition = 'transform 0.2s';
+    }
+    caret.onclick = (event) => {
+        event.stopPropagation();
+        updateState(!isOpen);
+    };
+
+    updateState(isOpen);
+};
+
+const findCaretNode = (header: HTMLElement): HTMLElement | null => {
+    const flagged = header.querySelector<HTMLElement>(`span[${VIEWED_SOURCES_CARET_ATTR}]`);
+    if (flagged) {
+        return flagged;
+    }
+    const spans = header.querySelectorAll('span');
+    for (const span of spans) {
+        if (span.querySelector('svg')) {
+            return span;
+        }
+    }
+    return null;
+};
+
+export const rehydrateViewedSourcesToggles = (root: HTMLElement | null) => {
+    if (!root) return;
+    const processed = new Set<HTMLElement>();
+
+    const processHeader = (header: HTMLElement) => {
+        if (processed.has(header)) return;
+        const caret = findCaretNode(header);
+        const list = header.nextElementSibling as HTMLElement | null;
+        if (!caret || !list) return;
+        attachViewedSourcesToggle(caret, list);
+        processed.add(header);
+    };
+
+    const datasetHeaders = Array.from(root.querySelectorAll<HTMLElement>(`[${VIEWED_SOURCES_HEADER_ATTR}]`));
+    datasetHeaders.forEach(processHeader);
+
+    const fallbackHeaders = Array.from(root.querySelectorAll<HTMLElement>('div')).filter((header) => {
+        if (processed.has(header)) return false;
+        const text = (header.textContent || '').trim();
+        if (!VIEWED_SOURCES_TEXT_REGEX.test(text)) return false;
+        const list = header.nextElementSibling as HTMLElement | null;
+        if (!list || list.tagName !== 'DIV') return false;
+        if (!list.querySelector('a')) return false;
+        return true;
+    });
+    fallbackHeaders.forEach(processHeader);
 };
 
 /**
@@ -540,17 +658,8 @@ export const buildSearchResultsBlock = async (
         // Sources list container (initially hidden)
         const listContainer = document.createElement('div');
         listContainer.style.display = 'none';
-
-        // Toggle visibility on caret click
-        let isOpen = false;
-        caret.style.cursor = 'pointer';
         caret.contentEditable = 'false';
-        caret.onclick = (e) => {
-            e.stopPropagation();
-            isOpen = !isOpen;
-            listContainer.style.display = isOpen ? 'block' : 'none';
-            caret.style.transform = isOpen ? 'rotate(90deg)' : 'rotate(0deg)';
-        };
+        attachViewedSourcesToggle(caret, listContainer, false);
 
         // Each source using the unified component
         infoItems.forEach((item) => {

@@ -10,6 +10,7 @@ import { MarginTextContainer, MarginTextData } from './MarginTextContainer';
 import { OPENAI_MODEL_OPTIONS } from '../lib/openaiAgentApi';
 import { generateWithOpenAI } from '../lib/openaiAgentApi';
 import { LineHeightHandle } from './LineHeightHandle';
+import { rehydrateViewedSourcesToggles } from '../lib/searchRenderers';
 import type { LocalDocument } from '../lib/localDocuments';
 
 type DocumentEditorProps = {
@@ -90,7 +91,107 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
     const icon = container.querySelector('[data-ai-output-icon="true"]') as HTMLElement | null;
     if (icon) {
-      icon.style.transform = collapsed ? 'rotate(0deg)' : 'rotate(90deg)';
+      icon.style.transform = 'rotate(0deg)';
+      const morphPath = icon.querySelector('[data-ai-output-morph="true"]') as SVGPathElement | null;
+      const loopTarget = icon.querySelector('[data-ai-output-loop-target="true"]') as SVGPathElement | null;
+      const lineTarget = icon.querySelector('[data-ai-output-line-target="true"]') as SVGPathElement | null;
+      if (morphPath && loopTarget && lineTarget) {
+        const SAMPLE_COUNT = 36;
+        const samplePath = (pathEl: SVGPathElement, samples: number) => {
+          const total = pathEl.getTotalLength();
+          const points = [];
+          for (let i = 0; i < samples; i += 1) {
+            const p = pathEl.getPointAtLength((total * i) / (samples - 1));
+            points.push({ x: p.x, y: p.y });
+          }
+          return points;
+        };
+        const pointsToD = (points: { x: number; y: number }[]) => {
+          if (!points.length) return '';
+          const [first, ...rest] = points;
+          const lines = rest.map((p) => `L ${p.x.toFixed(2)} ${p.y.toFixed(2)}`);
+          return `M ${first.x.toFixed(2)} ${first.y.toFixed(2)} ${lines.join(' ')}`;
+        };
+        const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+        const applyOutwardSpread = (points: { x: number; y: number }[], progress: number) => {
+          const spreadProgress = Math.min(1, progress * 1.6);
+          const intensity = Math.sin(spreadProgress * Math.PI) * 1.5 * (1 - progress * 0.6);
+          return points.map((point) => {
+            if (point.y >= 10) {
+              const direction = point.x < 8 ? -1 : 1;
+              return { x: point.x + direction * intensity, y: point.y };
+            }
+            return point;
+          });
+        };
+        const animateMorph = (
+          fromPath: SVGPathElement,
+          toPath: SVGPathElement,
+          duration = 220,
+          options: { spreadOutward?: boolean } = {},
+          onComplete?: () => void
+        ) => {
+          const existing = (fromPath as SVGPathElement & { _aiMorphRaf?: number })._aiMorphRaf;
+          if (existing) {
+            cancelAnimationFrame(existing);
+          }
+          const startPoints = samplePath(fromPath, SAMPLE_COUNT);
+          const endPoints = samplePath(toPath, SAMPLE_COUNT);
+          const start = performance.now();
+          const step = (now: number) => {
+            const t = Math.min(1, (now - start) / duration);
+            const e = easeInOut(t);
+            let nextPoints = startPoints.map((p, i) => ({
+              x: p.x + (endPoints[i].x - p.x) * e,
+              y: p.y + (endPoints[i].y - p.y) * e,
+            }));
+            if (options.spreadOutward) {
+              nextPoints = applyOutwardSpread(nextPoints, e);
+            }
+            fromPath.setAttribute('d', pointsToD(nextPoints));
+            fromPath.setAttribute('stroke-width', '1.5');
+            if (t < 1) {
+              (fromPath as SVGPathElement & { _aiMorphRaf?: number })._aiMorphRaf = requestAnimationFrame(step);
+            } else {
+              fromPath.setAttribute('d', pointsToD(endPoints));
+              fromPath.setAttribute('stroke-width', '1.5');
+              if (onComplete) {
+                onComplete();
+              }
+            }
+          };
+          (fromPath as SVGPathElement & { _aiMorphRaf?: number })._aiMorphRaf = requestAnimationFrame(step);
+        };
+
+        const setFinalIconState = (state: 'loop' | 'line') => {
+          morphPath.style.opacity = '0';
+          loopTarget.style.opacity = state === 'loop' ? '1' : '0';
+          lineTarget.style.opacity = state === 'line' ? '1' : '0';
+          icon.dataset.aiOutputState = state;
+        };
+
+        const currentState = (icon.dataset.aiOutputState as 'loop' | 'line') ?? 'line';
+        const targetState = collapsed ? 'loop' : 'line';
+        if (currentState === targetState) {
+          setFinalIconState(targetState);
+          return;
+        }
+
+        const startPath = currentState === 'loop' ? loopTarget : lineTarget;
+        const endPath = targetState === 'loop' ? loopTarget : lineTarget;
+        if (!startPath || !endPath) {
+          setFinalIconState(targetState);
+          return;
+        }
+
+        morphPath.setAttribute('d', startPath.getAttribute('d') ?? '');
+        morphPath.style.opacity = '1';
+        loopTarget.style.opacity = '0';
+        lineTarget.style.opacity = '0';
+
+        const animateOptions = collapsed ? {} : { spreadOutward: true };
+        animateMorph(morphPath, endPath, 220, animateOptions, () => setFinalIconState(targetState));
+      }
     }
   }, []);
 
@@ -283,6 +384,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       if (!editorRef.current) return;
       hydrateSearchResultImages(editorRef.current);
       normalizeContent();
+      rehydrateViewedSourcesToggles(editorRef.current);
 
       // Tag existing AI text
       editorRef.current.querySelectorAll('[data-ai-text="true"]').forEach((el) => {
@@ -318,7 +420,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
       refreshCollapsedAiOutputs();
     });
-  }, [doc.content, hydrateSearchResultImages, isPlaceholderHtml, normalizeContent, refreshCollapsedAiOutputs]);
+  }, [doc.content, hydrateSearchResultImages, isPlaceholderHtml, normalizeContent, refreshCollapsedAiOutputs, rehydrateViewedSourcesToggles]);
 
 
   useEffect(() => {

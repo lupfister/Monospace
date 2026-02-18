@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { MoveHorizontal, Sparkles, Loader2, Eye, EyeOff } from 'lucide-react';
+import { MoveHorizontal, Sparkles, Loader2 } from 'lucide-react';
 import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan } from '../lib/textStyles';
 import { isProbablyUrl } from '../lib/linkPreviews';
+import { applyAiHiddenState, clearAiHiddenState } from '../lib/aiOutputVisibility';
 
 import { useLinkHydrator } from '../hooks/useLinkHydrator';
 import { useSearchAgent } from '../hooks/useSearchAgent';
@@ -49,109 +50,121 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
   const lineHeightDragStart = useRef<{ y: number; initialHeight: number } | null>(null);
 
   const [selectedModel, setSelectedModel] = useState('gpt-4o-mini');
-  const [showAiText, setShowAiText] = useState(true);
-  const { handleAiReview, cancelReview, isLoading, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(editorRef, selectedModel, hydrateSearchResultImages);
   const [isTitleGenerating, setIsTitleGenerating] = useState(false);
   const titleGeneratedRef = useRef<Set<string>>(new Set());
 
-  const isBusy = isLoading;
+  const getAiOutputContainer = (node: Node | null): HTMLElement | null => {
+    if (!node) return null;
+    const element = node.nodeType === Node.ELEMENT_NODE ? (node as HTMLElement) : node.parentElement;
+    if (!element) return null;
+    return element.closest('[data-ai-output="true"]') as HTMLElement | null;
+  };
 
-  const refreshHiddenAi = useCallback(() => {
-    const root = editorRef.current;
-    if (!root) return;
+  const getCollapsedAiOutputContainer = (node: Node | null): HTMLElement | null => {
+    const container = getAiOutputContainer(node);
+    if (!container) return null;
+    return container.getAttribute('data-ai-output-collapsed') === 'true' ? container : null;
+  };
 
-    if (showAiText) {
-      root.querySelectorAll('[data-ai-hidden="true"]').forEach((el) => {
-        (el as HTMLElement).removeAttribute('data-ai-hidden');
-      });
-      root.querySelectorAll('[data-ai-contains-highlight="true"]').forEach((el) => {
-        (el as HTMLElement).removeAttribute('data-ai-contains-highlight');
-      });
-      return;
+  const setAiOutputCollapsed = useCallback((container: HTMLElement, collapsed: boolean) => {
+    const body = container.querySelector('[data-ai-output-body="true"]') as HTMLElement | null;
+    if (!body) return;
+
+    container.setAttribute('data-ai-output-collapsed', collapsed ? 'true' : 'false');
+
+    if (collapsed) {
+      applyAiHiddenState(body);
+    } else {
+      clearAiHiddenState(body);
     }
 
-    root.querySelectorAll('[data-ai-hidden="true"]').forEach((el) => {
-      (el as HTMLElement).removeAttribute('data-ai-hidden');
-    });
-    root.querySelectorAll('[data-ai-contains-highlight="true"]').forEach((el) => {
-      (el as HTMLElement).removeAttribute('data-ai-contains-highlight');
-    });
-    root.querySelectorAll('[data-ai-show-highlight="true"]').forEach((el) => {
-      (el as HTMLElement).removeAttribute('data-ai-show-highlight');
-    });
-    root.querySelectorAll('[data-ai-highlight-clone="true"]').forEach((clone) => {
-      clone.remove();
-    });
+    const label = container.querySelector('[data-ai-output-label="true"]') as HTMLElement | null;
+    if (label) {
+      label.textContent = collapsed ? 'Show full AI output' : 'Hide AI output';
+    }
 
-    const aiNodes = new Set<HTMLElement>();
-    root.querySelectorAll('[data-ai-text="true"], [data-ai-question="true"], [data-ai-origin="true"], span[role="link"]').forEach((el) => {
-      aiNodes.add(el as HTMLElement);
-    });
-    root.querySelectorAll('span').forEach((span) => {
-      const el = span as HTMLElement;
-      if (isAiTextSpan(el)) {
-        aiNodes.add(el);
+    const toggle = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
+    if (toggle) {
+      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    }
+
+    const icon = container.querySelector('[data-ai-output-icon="true"]') as HTMLElement | null;
+    if (icon) {
+      icon.style.transform = collapsed ? 'rotate(0deg)' : 'rotate(90deg)';
+    }
+  }, []);
+
+  const stripAiFromOutput = useCallback((container: HTMLElement) => {
+    const body = container.querySelector('[data-ai-output-body="true"]') as HTMLElement | null;
+    if (!body) return;
+
+    clearAiHiddenState(body);
+
+    const aiSelectors = '[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"], span[role="link"]';
+    const aiElements = Array.from(body.querySelectorAll(aiSelectors)) as HTMLElement[];
+
+    const extractAllowedContent = (node: Node, fragment: DocumentFragment) => {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as HTMLElement;
+        if (el.getAttribute('data-ai-highlighted') === 'true') {
+          fragment.appendChild(el.cloneNode(true));
+          return;
+        }
+        if (isHumanTextSpan(el)) {
+          fragment.appendChild(el.cloneNode(true));
+          return;
+        }
+        el.childNodes.forEach((child) => extractAllowedContent(child, fragment));
       }
-    });
-
-    aiNodes.forEach((el) => {
-      if (el !== root) {
-        el.setAttribute('data-ai-hidden', 'true');
-      }
-    });
-
-    const wrapAiTextNodes = (container: HTMLElement) => {
-      Array.from(container.childNodes).forEach((node) => {
-        if (node.nodeType !== Node.TEXT_NODE) return;
-        const text = node.textContent || '';
-        if (!text.trim()) return;
-        if ((node as Text).parentElement?.closest('[data-ai-highlighted="true"]')) return;
-        const span = document.createElement('span');
-        span.setAttribute('data-ai-text', 'true');
-        span.setAttribute('data-ai-hidden', 'true');
-        span.textContent = text;
-        node.parentNode?.insertBefore(span, node);
-        node.parentNode?.removeChild(node);
-      });
     };
 
-    root.querySelectorAll('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]').forEach((el) => {
-      wrapAiTextNodes(el as HTMLElement);
-    });
+    for (let i = aiElements.length - 1; i >= 0; i -= 1) {
+      const el = aiElements[i];
+      if (!el.parentNode) continue;
+      const fragment = document.createDocumentFragment();
+      el.childNodes.forEach((child) => extractAllowedContent(child, fragment));
+      el.parentNode.replaceChild(fragment, el);
+    }
 
-    root.querySelectorAll('[data-ai-text="true"]:not([data-ai-highlighted="true"])').forEach((el) => {
-      (el as HTMLElement).setAttribute('data-ai-hidden', 'true');
-    });
+    body.querySelectorAll('[data-ai-output-spacer="true"]').forEach((spacer) => spacer.remove());
+    body.querySelectorAll('[data-ai-output-toggle="true"]').forEach((toggle) => toggle.remove());
 
-    const highlightParents = new Set<HTMLElement>();
-    root.querySelectorAll('[data-ai-highlighted="true"]').forEach((el) => {
-      (el as HTMLElement).removeAttribute('data-ai-hidden');
-      let node: HTMLElement | null = el as HTMLElement;
-      while (node && node !== root) {
-        if (node.getAttribute('data-ai-hidden') === 'true') {
-          node.setAttribute('data-ai-contains-highlight', 'true');
-        }
-        node = node.parentElement;
+    const outputFragment = document.createDocumentFragment();
+    while (body.firstChild) {
+      outputFragment.appendChild(body.firstChild);
+    }
+    container.replaceWith(outputFragment);
+  }, []);
+
+  const refreshCollapsedAiOutputs = useCallback(() => {
+    const root = editorRef.current;
+    if (!root) return;
+    const collapsedOutputs = Array.from(root.querySelectorAll('[data-ai-output="true"][data-ai-output-collapsed="true"]')) as HTMLElement[];
+    collapsedOutputs.forEach((output) => {
+      setAiOutputCollapsed(output, true);
+    });
+  }, [setAiOutputCollapsed]);
+
+  const handleAiOutputInserted = useCallback((outputContainer: HTMLElement) => {
+    const root = editorRef.current;
+    if (!root) return;
+    const outputs = Array.from(root.querySelectorAll('[data-ai-output="true"]')) as HTMLElement[];
+    outputs.forEach((output) => {
+      if (output === outputContainer) {
+        setAiOutputCollapsed(output, false);
+      } else {
+        setAiOutputCollapsed(output, true);
       }
-      const block = (el as HTMLElement).closest('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]') as HTMLElement | null;
-      if (block) {
-        highlightParents.add(block);
-      }
     });
+  }, [setAiOutputCollapsed]);
 
-    const highlightSpans = Array.from(root.querySelectorAll('[data-ai-highlighted="true"]')) as HTMLElement[];
-    highlightSpans.forEach((el) => {
-      const block = el.closest('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]') as HTMLElement | null;
-      if (block) highlightParents.add(block);
-    });
+  const { handleAiReview, cancelReview, isLoading, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(
+    editorRef,
+    selectedModel,
+    hydrateSearchResultImages,
+    handleAiOutputInserted
+  );
 
-
-
-    highlightParents.forEach((block) => {
-      block.removeAttribute('data-ai-hidden');
-      block.setAttribute('data-ai-show-highlight', 'true');
-    });
-  }, [showAiText]);
 
   // Track selection changes to support toolbar actions that steal focus (like Select)
   useEffect(() => {
@@ -163,14 +176,14 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
           lastKnownRange.current = range.cloneRange();
         }
       }
-      if (!showAiText) {
-        refreshHiddenAi();
+      if (editorRef.current?.querySelector('[data-ai-output="true"][data-ai-output-collapsed="true"]')) {
+        refreshCollapsedAiOutputs();
       }
     };
 
     document.addEventListener('selectionchange', handleSelectionChange);
     return () => document.removeEventListener('selectionchange', handleSelectionChange);
-  }, [showAiText, refreshHiddenAi]);
+  }, [refreshCollapsedAiOutputs]);
 
   // Auto-set margin side when there are texts
   useEffect(() => {
@@ -302,13 +315,15 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
           }
         }
       });
+
+      refreshCollapsedAiOutputs();
     });
-  }, [doc.content, hydrateSearchResultImages, isPlaceholderHtml, normalizeContent]);
+  }, [doc.content, hydrateSearchResultImages, isPlaceholderHtml, normalizeContent, refreshCollapsedAiOutputs]);
 
 
   useEffect(() => {
-    refreshHiddenAi();
-  }, [refreshHiddenAi]);
+    refreshCollapsedAiOutputs();
+  }, [refreshCollapsedAiOutputs]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -816,6 +831,36 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
   };
 
   const handleClick = (e: React.MouseEvent) => {
+    const target = e.target as HTMLElement | null;
+    const toggle = target?.closest('[data-ai-output-toggle="true"]') as HTMLElement | null;
+    if (toggle) {
+      e.preventDefault();
+      e.stopPropagation();
+      const container = toggle.closest('[data-ai-output="true"]') as HTMLElement | null;
+      if (container) {
+        const iconOrLabel = (target as HTMLElement).closest('[data-ai-output-icon="true"], [data-ai-output-label="true"]');
+        if (iconOrLabel) {
+          const isCollapsed = container.getAttribute('data-ai-output-collapsed') === 'true';
+          setAiOutputCollapsed(container, !isCollapsed);
+          return;
+        }
+        const caret = toggle.querySelector('[data-ai-output-caret="true"]') as HTMLElement | null;
+        if (caret) {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          if (caret.firstChild && caret.firstChild.nodeType === Node.TEXT_NODE) {
+            range.setStart(caret.firstChild, caret.firstChild.textContent?.length ?? 0);
+          } else {
+            range.setStart(caret, caret.childNodes.length);
+          }
+          range.collapse(true);
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+        }
+      }
+      return;
+    }
+
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && !checkClickInSelection(e.clientX, e.clientY)) {
       // Allow browser to handle deselection
@@ -910,62 +955,6 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     }
   }, []);
 
-  const ensureVisibleInsertionPoint = useCallback((range: Range) => {
-    if (showAiText) return;
-
-    const startNode = range.startContainer;
-    const startElement = startNode.nodeType === Node.ELEMENT_NODE
-      ? startNode as Element
-      : startNode.parentElement;
-    if (!startElement) return;
-
-    const aiContainer = startElement.closest('[data-ai-origin="true"]') as HTMLElement | null;
-    if (!aiContainer) return;
-
-    if (
-      aiContainer.tagName === 'SPAN' &&
-      aiContainer.childNodes.length === 1 &&
-      aiContainer.firstChild?.nodeType === Node.TEXT_NODE &&
-      range.startContainer.nodeType === Node.TEXT_NODE
-    ) {
-      const textNode = aiContainer.firstChild as Text;
-      const offset = range.startOffset;
-      const text = textNode.data || '';
-      const beforeText = text.slice(0, offset);
-      const afterText = text.slice(offset);
-
-      const parent = aiContainer.parentNode;
-      if (!parent) return;
-
-      const beforeSpan = beforeText ? (aiContainer.cloneNode(false) as HTMLElement) : null;
-      const afterSpan = afterText ? (aiContainer.cloneNode(false) as HTMLElement) : null;
-
-      if (beforeSpan) {
-        beforeSpan.appendChild(document.createTextNode(beforeText));
-        parent.insertBefore(beforeSpan, aiContainer);
-      }
-      if (afterSpan) {
-        afterSpan.appendChild(document.createTextNode(afterText));
-        parent.insertBefore(afterSpan, aiContainer.nextSibling);
-      }
-
-      parent.removeChild(aiContainer);
-
-      if (beforeSpan) {
-        range.setStartAfter(beforeSpan);
-      } else if (afterSpan) {
-        range.setStartBefore(afterSpan);
-      } else {
-        range.setStart(parent, parent.childNodes.length);
-      }
-      range.collapse(true);
-      return;
-    }
-
-    range.setStartAfter(aiContainer);
-    range.collapse(true);
-  }, [showAiText]);
-
   const getHighlightSpan = (range: Range): HTMLElement | null => {
     const startNode = range.startContainer;
     const startElement = startNode.nodeType === Node.ELEMENT_NODE
@@ -1015,8 +1004,9 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
     if (!range.collapsed) range.deleteContents();
 
-    const highlightSpan = !showAiText ? getHighlightSpan(range) : null;
-    if (!showAiText && highlightSpan) {
+    const collapsedOutput = getCollapsedAiOutputContainer(range.startContainer);
+    const highlightSpan = collapsedOutput ? getHighlightSpan(range) : null;
+    if (collapsedOutput && highlightSpan) {
       const textNode = range.startContainer.nodeType === Node.TEXT_NODE
         ? range.startContainer as Text
         : highlightSpan.firstChild as Text | null;
@@ -1093,6 +1083,26 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
     const ctrlKey = isMac ? e.metaKey : e.ctrlKey;
 
+    if (e.key === 'Backspace' || e.key === 'Delete') {
+      const selection = window.getSelection();
+      if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        const toggle = (range.startContainer.nodeType === Node.ELEMENT_NODE
+          ? (range.startContainer as HTMLElement)
+          : range.startContainer.parentElement
+        )?.closest('[data-ai-output-toggle="true"]') as HTMLElement | null;
+        if (toggle) {
+          e.preventDefault();
+          e.stopPropagation();
+          const container = toggle.closest('[data-ai-output="true"]') as HTMLElement | null;
+          if (container) {
+            stripAiFromOutput(container);
+          }
+          return;
+        }
+      }
+    }
+
     // Cancel AI review with Escape
     if (e.key === 'Escape' && isLoading) {
       e.preventDefault();
@@ -1108,30 +1118,35 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       return;
     }
 
-    if (!ctrlKey && !e.metaKey && !e.altKey && e.key === 'Enter' && !showAiText) {
+    if (!ctrlKey && !e.metaKey && !e.altKey && e.key === 'Enter') {
       const selection = window.getSelection();
       if (selection && selection.rangeCount > 0) {
         const range = selection.getRangeAt(0);
-        const highlightSpan = getHighlightSpan(range);
-        if (highlightSpan) {
-          if (isAtEndOfHighlight(range, highlightSpan)) {
+        const collapsedOutput = getCollapsedAiOutputContainer(range.startContainer);
+        if (collapsedOutput) {
+          const highlightSpan = getHighlightSpan(range);
+          if (highlightSpan) {
+            if (isAtEndOfHighlight(range, highlightSpan)) {
+              e.preventDefault();
+              e.stopPropagation();
+              const aiBlock = highlightSpan.closest('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]') as HTMLElement | null;
+              const target = aiBlock ?? highlightSpan;
+              const p = document.createElement('p');
+              p.style.lineHeight = '1.5';
+              p.appendChild(document.createElement('br'));
+              target.parentNode?.insertBefore(p, target.nextSibling);
+              const newRange = document.createRange();
+              newRange.setStart(p, 0);
+              newRange.collapse(true);
+              selection.removeAllRanges();
+              selection.addRange(newRange);
+              return;
+            }
             e.preventDefault();
             e.stopPropagation();
-            const aiBlock = highlightSpan.closest('[data-ai-origin="true"], [data-ai-text="true"], [data-ai-question="true"]') as HTMLElement | null;
-            const target = aiBlock ?? highlightSpan;
-            const p = document.createElement('p');
-            p.style.lineHeight = '1.5';
-            p.appendChild(document.createElement('br'));
-            target.parentNode?.insertBefore(p, target.nextSibling);
-            const newRange = document.createRange();
-            newRange.setStart(p, 0);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
+            setAiOutputCollapsed(collapsedOutput, false);
             return;
           }
-          setShowAiText(true);
-          return;
         }
       }
     }
@@ -1364,14 +1379,6 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
           </div>
 
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowAiText((prev: boolean) => !prev)}
-              className={`p-1.5 hover:text-gray-700 transition-colors ${!showAiText ? 'text-gray-700 bg-gray-100 rounded' : ''}`}
-              title={showAiText ? "Hide AI Text" : "Show AI Text"}
-            >
-              {showAiText ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-            </button>
-
             <select
               id="model-select"
               value={OPENAI_MODEL_OPTIONS.includes(selectedModel) ? selectedModel : OPENAI_MODEL_OPTIONS[0]}
@@ -1506,43 +1513,47 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         `
       }} />
 
-      {!showAiText && (
-        <style dangerouslySetInnerHTML={{
-          __html: `
-            [data-ai-hidden="true"] {
-              display: none;
-            }
+      <style dangerouslySetInnerHTML={{
+        __html: `
+          [data-ai-hidden="true"] {
+            display: none;
+          }
 
-            [data-ai-contains-highlight="true"] {
-              display: contents;
-            }
+          [data-ai-contains-highlight="true"] {
+            display: contents;
+          }
 
-            [data-ai-highlighted="true"] {
-              display: inline;
-              visibility: visible;
-            }
+          [data-ai-highlighted="true"] {
+            display: inline;
+            visibility: visible;
+          }
 
-            [data-ai-show-highlight="true"] {
-              display: block !important;
-              visibility: hidden;
-            }
+          [data-ai-show-highlight="true"] {
+            display: block !important;
+            visibility: hidden;
+            margin-bottom: 1.5em;
+          }
 
-            [data-ai-show-highlight="true"] [data-ai-highlighted="true"] {
-              visibility: visible;
-              display: inline;
-            }
+          [data-ai-show-highlight="true"] [data-ai-highlighted="true"] {
+            visibility: visible;
+            display: inline;
+          }
 
-            [data-ai-highlight-clone="true"] {
-              display: block;
-              font-family: inherit;
-              font-size: inherit;
-              line-height: 1.5;
-              color: inherit;
-              margin-top: 0.25rem;
-            }
-          `
-        }} />
-      )}
+          [data-ai-output-collapsed="true"] [data-ai-show-highlight="true"] + * {
+            margin-top: 1.5em;
+          }
+
+
+          [data-ai-highlight-clone="true"] {
+            display: block;
+            font-family: inherit;
+            font-size: inherit;
+            line-height: 1.5;
+            color: inherit;
+            margin-top: 0.25rem;
+          }
+        `
+      }} />
 
       <LineHeightHandle editorRef={editorRef} />
     </div>

@@ -16,6 +16,12 @@ export const extractDocumentContext = (editor: HTMLElement): ContextBlock[] => {
     let currentSource: ContextSource | null = null;
     let currentText = '';
 
+    const isInOutputToggle = (node: Node): boolean => {
+        const element = node.nodeType === Node.ELEMENT_NODE ? (node as HTMLElement) : node.parentElement;
+        if (!element) return false;
+        return Boolean(element.closest('[data-ai-output-toggle="true"]'));
+    };
+
     const commitCurrent = () => {
         if (currentSource && currentText.trim()) {
             blocks.push({ source: currentSource, text: currentText.trim() });
@@ -25,6 +31,10 @@ export const extractDocumentContext = (editor: HTMLElement): ContextBlock[] => {
     };
 
     const processNode = (node: Node) => {
+        if (isInOutputToggle(node)) {
+            return;
+        }
+
         if (node.nodeType === Node.TEXT_NODE) {
             const text = node.textContent || '';
             if (!text.trim()) return;
@@ -56,6 +66,9 @@ export const extractDocumentContext = (editor: HTMLElement): ContextBlock[] => {
         } else if (node.nodeType === Node.ELEMENT_NODE) {
             // Recurse for elements
             const element = node as HTMLElement;
+            if (element.getAttribute('data-ai-output-toggle') === 'true') {
+                return;
+            }
             // Handle line breaks as text separators if needed, but ' ' usually suffices for context
             if (element.tagName === 'BR') {
                 if (currentSource) currentText += '\n';

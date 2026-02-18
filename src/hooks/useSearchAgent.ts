@@ -14,7 +14,8 @@ export type ReviewPhase = 'idle' | 'planning' | 'searching' | 'generating' | 're
 export function useSearchAgent(
     editorRef: React.RefObject<HTMLDivElement>,
     selectedModel: string,
-    hydrateSearchResultImages: (root: HTMLElement | null) => void
+    hydrateSearchResultImages: (root: HTMLElement | null) => void,
+    onResultsInserted?: (outputContainer: HTMLElement) => void
 ) {
     const [phase, setPhase] = useState<ReviewPhase>('idle');
     const [error, setError] = useState<AiError | null>(null);
@@ -127,13 +128,14 @@ export function useSearchAgent(
 
             if (searchResults.length > 0 || (narrative && narrative.blocks.length > 0)) {
                 const resultItems = orderedSearchResultsToItems(searchResults as AgentSearchResult[]);
-                const resultsFragment = await buildSearchResultsBlock(resultItems, narrative);
+                const resultsBlock = await buildSearchResultsBlock(resultItems, narrative);
 
                 // Replace shimmer with results
-                shimmer.replaceWith(resultsFragment);
+                shimmer.replaceWith(resultsBlock);
                 shimmerRef.current = null;
 
                 hydrateSearchResultImages(editorRef.current);
+                onResultsInserted?.(resultsBlock);
             } else {
                 // No results - remove shimmer, set error
                 shimmer.remove();

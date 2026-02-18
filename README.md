@@ -18,6 +18,7 @@ This project is an experiment in **document‑first UX**:
    - Execute those searches in parallel with the hosted `web_search` tool.
    - Generate a structured “skeleton notes” JSON response (info + questions).
 5. **Rendering in the document:** The client renders:
+   - A per‑review AI output wrapper with a loop‑icon toggle
    - A collapsible “Viewed sources” list
    - The best image and/or video embeds
    - A highlighted excerpt quote
@@ -26,13 +27,21 @@ This project is an experiment in **document‑first UX**:
 7. **Image proxy:** Media embeds use `/api/ai/image` to safely fetch OG images or page images and avoid broken thumbnails.
 
 ## Key UX features
-- **Inline AI blocks:** AI output is inserted directly into the editor and tagged for optional hiding.
-- **Hide/show AI text:** Toggle visibility of AI blocks with the eye icon.
+- **Inline AI blocks:** Each AI review is inserted directly into the editor as a self‑contained output block.
+- **Per‑output hiding:** Every AI output has its own loop‑icon line to collapse/reveal it; hidden outputs leave only highlights and user text visible.
 - **Margin notes:** Drag a selection into the left or right margin to create a floating note; click once to edit, double‑click to expand back into the main document.
 - **Multi‑selection drag:** Hold Shift to create extra selections, then drag them together.
 - **Line‑height handle:** Empty gap blocks can be expanded/contracted with a draggable handle for manual spacing control.
 - **Smart paste:** URLs become source pills; text preserves line breaks.
 - **Local persistence:** Document content is stored in `localStorage` on save (`Cmd/Ctrl + S`).
+
+## AI review lifecycle (vision)
+1. Day 0: the user writes notes.
+2. Day 1: the AI review inserts excerpts and questions into the document.
+3. Day 2+: the previous day’s AI output collapses into a single loop‑icon line; only highlighted AI text and user‑written text remain visible. Clicking the line reveals the full output.
+4. A fresh AI review appears below, and the cycle repeats.
+
+In this prototype, “days” are simulated manually: each AI output can be collapsed/expanded via its own loop‑icon line, and new reviews auto‑collapse earlier outputs to keep focus on the current pass.
 
 ## Architecture
 - **Frontend:** React + Vite + Tailwind utilities (with some custom DOM manipulation).
@@ -45,6 +54,7 @@ This project is an experiment in **document‑first UX**:
 - `src/components/LineHeightHandle.tsx` — adjustable empty‑line spacing control.
 - `src/hooks/useSearchAgent.ts` — AI review client flow and shimmer handling.
 - `src/hooks/useLinkHydrator.ts` — URL → source pill conversion, image hydration.
+- `src/lib/aiOutputVisibility.ts` — per‑output AI hiding logic (collapsed state + highlight preservation).
 - `src/lib/searchRenderers.ts` — renders sources/media/quotes/notes into the doc.
 - `src/lib/openaiAgentApi.ts` — client API helpers and types.
 - `server/src/ai.ts` — OpenAI Agents logic (plan, search, narrative).

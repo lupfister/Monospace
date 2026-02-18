@@ -113,6 +113,61 @@ export const createErrorBlock = (error: AiError): HTMLDivElement => {
     return container;
 };
 
+const createAiOutputSpacer = (): HTMLParagraphElement => {
+    const spacer = document.createElement('p');
+    spacer.dataset.aiOutputSpacer = 'true';
+    spacer.style.lineHeight = '1.5';
+    spacer.appendChild(document.createElement('br'));
+    return spacer;
+};
+
+const createAiOutputToggle = (): HTMLParagraphElement => {
+    const toggle = document.createElement('p');
+    toggle.dataset.aiOutputToggle = 'true';
+    toggle.contentEditable = 'true';
+    toggle.setAttribute('role', 'button');
+    toggle.setAttribute('aria-expanded', 'true');
+    toggle.style.lineHeight = '1.5';
+    toggle.style.display = 'inline-flex';
+    toggle.style.alignItems = 'center';
+    toggle.style.gap = '4px';
+    toggle.style.cursor = 'pointer';
+    toggle.style.userSelect = 'none';
+    toggle.style.color = '#6e6e6e';
+    toggle.style.fontFamily = 'Inter, sans-serif';
+    toggle.style.fontSize = '14px';
+    toggle.style.fontWeight = '350';
+    toggle.style.fontVariationSettings = '"wght" 350';
+
+    const icon = document.createElement('span');
+    icon.dataset.aiOutputIcon = 'true';
+    icon.contentEditable = 'false';
+    icon.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: inline; vertical-align: middle;"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.13-3.36L23 10"></path><path d="M20.49 15a9 9 0 0 1-14.13 3.36L1 14"></path></svg>`;
+    icon.style.display = 'inline';
+    icon.style.transition = 'transform 0.2s';
+    icon.style.color = '#6e6e6e';
+    icon.style.transform = 'rotate(90deg)';
+
+    const label = document.createElement('span');
+    label.dataset.aiOutputLabel = 'true';
+    label.textContent = 'Hide AI output';
+    label.contentEditable = 'false';
+
+    const caret = document.createElement('span');
+    caret.dataset.aiOutputCaret = 'true';
+    caret.textContent = '\u200B';
+    caret.contentEditable = 'true';
+    caret.style.display = 'inline-block';
+    caret.style.width = '0';
+    caret.style.overflow = 'hidden';
+
+    toggle.appendChild(icon);
+    toggle.appendChild(label);
+    toggle.appendChild(caret);
+
+    return toggle;
+};
+
 /**
  * Creates an interactive source item with a "Learn more" button integrated within the link.
  */
@@ -404,7 +459,20 @@ const createSpacer = () => {
 export const buildSearchResultsBlock = async (
     items: ResultItem[],
     notes?: SkeletonNotes
-): Promise<DocumentFragment> => {
+): Promise<HTMLElement> => {
+    const outputContainer = document.createElement('div');
+    outputContainer.dataset.aiOutput = 'true';
+    outputContainer.dataset.aiOutputCollapsed = 'false';
+
+    outputContainer.appendChild(createAiOutputSpacer());
+    const toggle = createAiOutputToggle();
+    outputContainer.appendChild(toggle);
+    outputContainer.appendChild(createAiOutputSpacer());
+
+    const body = document.createElement('div');
+    body.dataset.aiOutputBody = 'true';
+    outputContainer.appendChild(body);
+
     const fragment = document.createDocumentFragment();
 
     // Fix: Reclassify articles that are actually videos/images (legacy check, mostly unused now as we only search web)
@@ -441,7 +509,8 @@ export const buildSearchResultsBlock = async (
     const hasNotes = notes && notes.blocks.length > 0;
     if (infoItems.length === 0 && !hasNotes) {
         addTextBlock('No results found. Try a different search query.');
-        return fragment;
+        body.appendChild(fragment);
+        return outputContainer;
     }
 
     // 1. Sources Section (Viewed Sources) - TOP PRIORITY
@@ -510,7 +579,6 @@ export const buildSearchResultsBlock = async (
         sourcesContainer.appendChild(headerDiv);
         sourcesContainer.appendChild(listContainer);
 
-        fragment.appendChild(createSpacer());
         fragment.appendChild(sourcesContainer);
         fragment.appendChild(createSpacer());
     }
@@ -652,5 +720,6 @@ export const buildSearchResultsBlock = async (
         });
     }
 
-    return fragment;
+    body.appendChild(fragment);
+    return outputContainer;
 };

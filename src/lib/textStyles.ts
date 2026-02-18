@@ -172,6 +172,7 @@ export const createHumanTextSpan = (text: string, lineHeight?: string): HTMLSpan
   }
   span.style.whiteSpace = 'pre-wrap';
   span.textContent = text;
+  span.setAttribute('data-human-text', 'true');
   return span;
 };
 

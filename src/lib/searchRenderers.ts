@@ -200,6 +200,120 @@ const createAiOutputToggle = (): HTMLParagraphElement => {
 const VIEWED_SOURCES_HEADER_ATTR = 'data-viewed-sources-header';
 const VIEWED_SOURCES_CARET_ATTR = 'data-viewed-sources-caret';
 const VIEWED_SOURCES_TEXT_REGEX = /^Viewed \d+ sources?/i;
+const VIEWED_SOURCES_ICON_STATE_ATTR = 'data-viewed-sources-icon-state';
+const VIEWED_SOURCES_ICON_MORPH_ATTR = 'data-viewed-sources-morph';
+const VIEWED_SOURCES_ICON_MAGNIFIER_ATTR = 'data-viewed-sources-magnifier-target';
+const VIEWED_SOURCES_ICON_LINE_ATTR = 'data-viewed-sources-line-target';
+type ViewedSourcesIconState = 'magnifier' | 'line';
+const VIEWED_SOURCES_MORPH_SAMPLES = 36;
+const VIEWED_SOURCES_ANIMATION_DURATION = 220;
+
+const samplePathPoints = (pathEl: SVGPathElement, samples: number) => {
+    const total = pathEl.getTotalLength();
+    const points = [];
+    for (let i = 0; i < samples; i += 1) {
+        const length = (total * i) / (samples - 1);
+        points.push(pathEl.getPointAtLength(length));
+    }
+    return points;
+};
+
+const pointsToD = (points: { x: number; y: number }[]) => {
+    if (!points.length) return '';
+    const [first, ...rest] = points;
+    const lines = rest.map((p) => `L ${p.x.toFixed(2)} ${p.y.toFixed(2)}`);
+    return `M ${first.x.toFixed(2)} ${first.y.toFixed(2)} ${lines.join(' ')}`;
+};
+
+const animateViewedSourcesMorph = (
+    morphPath: SVGPathElement,
+    fromPath: SVGPathElement,
+    toPath: SVGPathElement,
+    duration: number,
+    onComplete?: () => void
+) => {
+    const startPoints = samplePathPoints(fromPath, VIEWED_SOURCES_MORPH_SAMPLES);
+    const endPoints = samplePathPoints(toPath, VIEWED_SOURCES_MORPH_SAMPLES);
+    const start = performance.now();
+    const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+
+    const step = (now: number) => {
+        const t = Math.min(1, (now - start) / duration);
+        const eased = easeInOut(t);
+        const nextPoints = startPoints.map((point, index) => ({
+            x: point.x + (endPoints[index].x - point.x) * eased,
+            y: point.y + (endPoints[index].y - point.y) * eased,
+        }));
+        morphPath.setAttribute('d', pointsToD(nextPoints));
+        morphPath.setAttribute('stroke-width', '1.5');
+        if (t < 1) {
+            requestAnimationFrame(step);
+        } else {
+            morphPath.setAttribute('d', pointsToD(endPoints));
+            morphPath.setAttribute('stroke-width', '1.5');
+            if (onComplete) onComplete();
+        }
+    };
+    morphPath.setAttribute('stroke-width', '1.5');
+    morphPath.style.opacity = '1';
+    requestAnimationFrame(step);
+};
+
+const setViewedSourcesIconState = (icon: HTMLElement, state: ViewedSourcesIconState) => {
+    const morphPath = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_MORPH_ATTR}]`);
+    const targetPath = icon.querySelector<SVGPathElement>(
+        state === 'magnifier' ? `[${VIEWED_SOURCES_ICON_MAGNIFIER_ATTR}]` : `[${VIEWED_SOURCES_ICON_LINE_ATTR}]`
+    );
+    if (!morphPath || !targetPath) return;
+    morphPath.setAttribute('d', targetPath.getAttribute('d') ?? '');
+    icon.dataset.viewedSourcesIconState = state;
+    morphPath.style.opacity = '1';
+};
+
+const transitionViewedSourcesIcon = (
+    icon: HTMLElement,
+    targetState: ViewedSourcesIconState,
+    animate = true
+) => {
+    const morphPath = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_MORPH_ATTR}]`);
+    const magnifierTarget = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_MAGNIFIER_ATTR}]`);
+    const lineTarget = icon.querySelector<SVGPathElement>(`[${VIEWED_SOURCES_ICON_LINE_ATTR}]`);
+    if (!morphPath || !magnifierTarget || !lineTarget) return;
+
+    const currentState = (icon.dataset.viewedSourcesIconState as ViewedSourcesIconState) ?? 'magnifier';
+    if (!animate || currentState === targetState) {
+        setViewedSourcesIconState(icon, targetState);
+        return;
+    }
+
+    const startPath = currentState === 'magnifier' ? magnifierTarget : lineTarget;
+    const endPath = targetState === 'magnifier' ? magnifierTarget : lineTarget;
+    morphPath.setAttribute('d', startPath.getAttribute('d') ?? '');
+    animateViewedSourcesMorph(morphPath, startPath, endPath, VIEWED_SOURCES_ANIMATION_DURATION, () => {
+        setViewedSourcesIconState(icon, targetState);
+    });
+};
+
+const createViewedSourcesIcon = (): HTMLElement => {
+    const icon = document.createElement('span');
+    icon.dataset.viewedSourcesCaret = 'true';
+    icon.dataset.viewedSourcesIconState = 'magnifier';
+    icon.style.display = 'inline-flex';
+    icon.style.alignItems = 'center';
+    icon.style.justifyContent = 'center';
+    icon.style.width = '18px';
+    icon.style.height = '18px';
+    icon.style.userSelect = 'none';
+    icon.style.cursor = 'pointer';
+    icon.innerHTML = `
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path ${VIEWED_SOURCES_ICON_MORPH_ATTR} d="M7 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm4.5 6.5L13 13" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>
+            <path ${VIEWED_SOURCES_ICON_MAGNIFIER_ATTR} d="M7 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm4.5 6.5L13 13" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" opacity="0" pointer-events="none"/>
+            <path ${VIEWED_SOURCES_ICON_LINE_ATTR} d="M3 8h10" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" opacity="0" pointer-events="none"/>
+        </svg>
+    `;
+    return icon;
+};
 
 const getInitialViewedSourcesState = (list: HTMLElement, fallback?: boolean): boolean => {
     if (typeof fallback === 'boolean') {
@@ -213,35 +327,40 @@ const getInitialViewedSourcesState = (list: HTMLElement, fallback?: boolean): bo
     return false;
 };
 
-const attachViewedSourcesToggle = (caret: HTMLElement, list: HTMLElement, fallbackState?: boolean) => {
-    if (!caret || !list) return;
+const attachViewedSourcesToggle = (icon: HTMLElement, list: HTMLElement, fallbackState?: boolean) => {
+    if (!icon || !list) return;
 
-    const header = caret.closest('div');
+    const header = icon.closest('div');
     if (header) {
         header.dataset.viewedSourcesHeader = 'true';
     }
-    caret.dataset.viewedSourcesCaret = 'true';
+    icon.dataset.viewedSourcesCaret = 'true';
     list.dataset.viewedSourcesList = 'true';
 
     let isOpen = getInitialViewedSourcesState(list, fallbackState);
-    const updateState = (open: boolean) => {
+    const updateState = (open: boolean, animate = true) => {
         isOpen = open;
         list.style.display = open ? 'block' : 'none';
-        caret.style.transform = open ? 'rotate(90deg)' : 'rotate(0deg)';
         list.dataset.viewedSourcesOpen = open ? 'true' : 'false';
-        caret.dataset.viewedSourcesOpen = open ? 'true' : 'false';
+        icon.dataset.viewedSourcesOpen = open ? 'true' : 'false';
+        transitionViewedSourcesIcon(icon, open ? 'line' : 'magnifier', animate);
     };
 
-    caret.style.cursor = 'pointer';
-    if (!caret.style.transition) {
-        caret.style.transition = 'transform 0.2s';
+    if (icon.dataset.viewedSourcesAttached !== 'true') {
+        icon.tabIndex = 0;
+        icon.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                updateState(!isOpen);
+            }
+        });
+        icon.addEventListener('click', (event) => {
+            event.stopPropagation();
+            updateState(!isOpen);
+        });
+        icon.dataset.viewedSourcesAttached = 'true';
     }
-    caret.onclick = (event) => {
-        event.stopPropagation();
-        updateState(!isOpen);
-    };
-
-    updateState(isOpen);
+    updateState(isOpen, false);
 };
 
 const findCaretNode = (header: HTMLElement): HTMLElement | null => {
@@ -643,23 +762,16 @@ export const buildSearchResultsBlock = async (
         const headerDiv = document.createElement('div');
         headerDiv.style.lineHeight = '1.5';
 
-        // Larger lined caret icon (SVG chevron)
-        const caret = document.createElement('span');
-        caret.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: inline; vertical-align: middle;"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
-        caret.style.display = 'inline';
-        caret.style.transition = 'transform 0.2s';
-        caret.style.color = '#6e6e6e';
-        caret.style.marginRight = '4px';
-
+        const icon = createViewedSourcesIcon();
+        icon.style.marginRight = '4px';
         const headerSpan = createAiTextSpan(`Viewed ${sourceCount} source${sourceCount === 1 ? '' : 's'}`);
-        headerDiv.appendChild(caret);
+        headerDiv.appendChild(icon);
         headerDiv.appendChild(headerSpan);
 
         // Sources list container (initially hidden)
         const listContainer = document.createElement('div');
         listContainer.style.display = 'none';
-        caret.contentEditable = 'false';
-        attachViewedSourcesToggle(caret, listContainer, false);
+        attachViewedSourcesToggle(icon, listContainer, false);
 
         // Each source using the unified component
         infoItems.forEach((item) => {
@@ -761,6 +873,9 @@ export const buildSearchResultsBlock = async (
         cleaned = cleaned.replace(/\s*\([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\)\.?$/g, '');
         // Remove "Source: ..." or "Via: ..." at the end
         cleaned = cleaned.replace(/\s*(?:Source|Via):.*$/i, '');
+        // Remove wrapping quotes (straight or curly) if present
+        cleaned = cleaned.trim();
+        cleaned = cleaned.replace(/^["“”]+/, '').replace(/["“”]+$/, '');
         return cleaned.trim();
     };
 
@@ -769,7 +884,7 @@ export const buildSearchResultsBlock = async (
             // Render excerpt as plain italic text, cleaned of citations
             const rawSnippet = excerptItem.snippet || '';
             const cleanedSnippet = cleanSnippet(rawSnippet);
-            const excerptText = `"${cleanedSnippet}"`;
+            const excerptText = cleanedSnippet;
 
 
             const excerptP = document.createElement('p');

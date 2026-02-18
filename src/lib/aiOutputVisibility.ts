@@ -1,4 +1,4 @@
-import { isAiTextSpan } from './textStyles';
+import { isAiTextSpan, isHumanTextSpan } from './textStyles';
 
 const removeAttributeFromAll = (root: HTMLElement, selector: string, attr: string) => {
   root.querySelectorAll(selector).forEach((el) => {
@@ -10,6 +10,7 @@ export const clearAiHiddenState = (root: HTMLElement) => {
   removeAttributeFromAll(root, '[data-ai-hidden="true"]', 'data-ai-hidden');
   removeAttributeFromAll(root, '[data-ai-contains-highlight="true"]', 'data-ai-contains-highlight');
   removeAttributeFromAll(root, '[data-ai-show-highlight="true"]', 'data-ai-show-highlight');
+  root.querySelectorAll('[data-ai-linebreak="true"]').forEach((linebreak) => linebreak.remove());
   root.querySelectorAll('[data-ai-highlight-clone="true"]').forEach((clone) => clone.remove());
 };
 
@@ -27,6 +28,9 @@ export const applyAiHiddenState = (root: HTMLElement) => {
     const el = span as HTMLElement;
     if (isAiTextSpan(el)) {
       aiNodes.add(el);
+    }
+    if (isHumanTextSpan(el)) {
+      el.setAttribute('data-human-text', 'true');
     }
   });
 
@@ -85,5 +89,23 @@ export const applyAiHiddenState = (root: HTMLElement) => {
     block.removeAttribute('data-ai-hidden');
     block.setAttribute('data-ai-show-highlight', 'true');
   });
-};
 
+  const visibleUnits = Array.from(root.querySelectorAll('[data-ai-highlighted="true"], [data-human-text="true"]')) as HTMLElement[];
+  visibleUnits.forEach((el, index) => {
+    if (index === visibleUnits.length - 1) return;
+    const next = el.nextSibling as HTMLElement | null;
+    if (next && next.nodeType === Node.ELEMENT_NODE && (next as HTMLElement).getAttribute('data-ai-linebreak') === 'true') {
+      return;
+    }
+    const spacer = document.createElement('span');
+    spacer.setAttribute('data-ai-linebreak', 'true');
+    spacer.style.display = 'block';
+    spacer.style.whiteSpace = 'pre-wrap';
+    const computed = window.getComputedStyle(el);
+    spacer.style.fontFamily = computed.fontFamily;
+    spacer.style.fontSize = computed.fontSize;
+    spacer.style.lineHeight = computed.lineHeight;
+    spacer.textContent = '\n';
+    el.parentNode?.insertBefore(spacer, el.nextSibling);
+  });
+};

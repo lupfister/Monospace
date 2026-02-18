@@ -1633,7 +1633,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
           [data-ai-show-highlight="true"] {
             display: block !important;
             visibility: hidden;
-            margin-bottom: 1.5em;
+            margin-bottom: 0;
           }
 
           [data-ai-show-highlight="true"] [data-ai-highlighted="true"] {
@@ -1641,8 +1641,14 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
             display: inline;
           }
 
-          [data-ai-output-collapsed="true"] [data-ai-show-highlight="true"] + * {
-            margin-top: 1.5em;
+          [data-ai-output-collapsed="true"] [data-ai-highlighted="true"],
+          [data-ai-output-collapsed="true"] [data-human-text="true"] {
+            display: block;
+          }
+
+          [data-ai-linebreak="true"] {
+            display: block;
+            white-space: pre-wrap;
           }
 
 

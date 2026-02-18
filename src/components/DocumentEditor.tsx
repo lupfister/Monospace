@@ -3,6 +3,7 @@ import { MoveHorizontal, Sparkles, Loader2 } from 'lucide-react';
 import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan } from '../lib/textStyles';
 import { isProbablyUrl } from '../lib/linkPreviews';
 import { applyAiHiddenState, clearAiHiddenState } from '../lib/aiOutputVisibility';
+import { formatAiOutputLabel } from '../lib/aiOutputLabel';
 
 import { useLinkHydrator } from '../hooks/useLinkHydrator';
 import { useSearchAgent } from '../hooks/useSearchAgent';
@@ -68,6 +69,11 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     return container.getAttribute('data-ai-output-collapsed') === 'true' ? container : null;
   };
 
+  const getAiOutputLabelText = (container: HTMLElement, collapsed: boolean) => {
+    const generatedAt = container.getAttribute('data-ai-output-generated-at');
+    return formatAiOutputLabel(collapsed, generatedAt);
+  };
+
   const isSelectionInCollapsedOutput = (range: Range): boolean => {
     return Boolean(
       getCollapsedAiOutputContainer(range.startContainer) ||
@@ -127,12 +133,12 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
     const label = container.querySelector('[data-ai-output-label="true"]') as HTMLElement | null;
     if (label) {
-      label.textContent = collapsed ? 'Show full AI output' : 'Hide AI output';
+      label.textContent = getAiOutputLabelText(container, collapsed);
     } else if (toggle) {
       const fallbackLabel = document.createElement('span');
       fallbackLabel.dataset.aiOutputLabel = 'true';
       fallbackLabel.dataset.aiUi = 'true';
-      fallbackLabel.textContent = collapsed ? 'Show full AI output' : 'Hide AI output';
+      fallbackLabel.textContent = getAiOutputLabelText(container, collapsed);
       fallbackLabel.contentEditable = 'false';
       toggle.appendChild(fallbackLabel);
     }
@@ -445,10 +451,10 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         const label = toggle.querySelector<HTMLElement>('[data-ai-output-label="true"]');
         if (label) {
           label.dataset.aiUi = 'true';
-          if (!label.textContent || label.textContent.trim().length === 0) {
-            const container = toggle.closest('[data-ai-output="true"]') as HTMLElement | null;
-            const collapsed = container?.getAttribute('data-ai-output-collapsed') === 'true';
-            label.textContent = collapsed ? 'Show full AI output' : 'Hide AI output';
+          const container = toggle.closest('[data-ai-output="true"]') as HTMLElement | null;
+          if (container) {
+            const collapsed = container.getAttribute('data-ai-output-collapsed') === 'true';
+            label.textContent = getAiOutputLabelText(container, collapsed);
           }
         }
       });

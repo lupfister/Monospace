@@ -2,6 +2,7 @@ import { resultCardClasses, type ResultItem } from './searchResultItems';
 import { isImageUrl } from './linkPreviews';
 import { createAiTextBlock } from './domUtils';
 import { createAiTextWithLinksFragment, createAiTextSpan, createStyledSourceLink } from './textStyles';
+import { formatAiOutputLabel } from './aiOutputLabel';
 import { SkeletonNotes, SkeletonNoteBlock, AiError, exploreSource } from './openaiAgentApi';
 
 
@@ -121,7 +122,7 @@ const createAiOutputSpacer = (): HTMLParagraphElement => {
     return spacer;
 };
 
-const createAiOutputToggle = (): HTMLParagraphElement => {
+const createAiOutputToggle = (generatedAt?: string | null): HTMLParagraphElement => {
     const toggle = document.createElement('p');
     toggle.dataset.aiOutputToggle = 'true';
     toggle.dataset.aiUi = 'true';
@@ -184,7 +185,7 @@ const createAiOutputToggle = (): HTMLParagraphElement => {
     const label = document.createElement('span');
     label.dataset.aiOutputLabel = 'true';
     label.dataset.aiUi = 'true';
-    label.textContent = 'Hide AI output';
+    label.textContent = formatAiOutputLabel(false, generatedAt);
     label.contentEditable = 'false';
 
     const caret = document.createElement('span');
@@ -343,12 +344,19 @@ const getInitialViewedSourcesState = (list: HTMLElement, fallback?: boolean): bo
     return false;
 };
 
-const attachViewedSourcesToggle = (icon: HTMLElement, list: HTMLElement, fallbackState?: boolean) => {
+const attachViewedSourcesToggle = (
+    icon: HTMLElement,
+    list: HTMLElement,
+    fallbackState?: boolean,
+    headerOverride?: HTMLElement | null
+) => {
     if (!icon || !list) return;
 
-    const header = icon.closest(`[${VIEWED_SOURCES_HEADER_ATTR}]`) as HTMLElement | null;
+    const header = headerOverride
+        || (icon.closest(`[${VIEWED_SOURCES_HEADER_ATTR}]`) as HTMLElement | null);
     if (header) {
         header.dataset.viewedSourcesHeader = 'true';
+        header.style.cursor = 'pointer';
     }
     icon.dataset.viewedSourcesCaret = 'true';
     list.dataset.viewedSourcesList = 'true';
@@ -380,6 +388,13 @@ const attachViewedSourcesToggle = (icon: HTMLElement, list: HTMLElement, fallbac
         });
         icon.dataset.viewedSourcesAttached = 'true';
     }
+    if (header && header.dataset.viewedSourcesAttached !== 'true') {
+        header.addEventListener('click', (event) => {
+            event.stopPropagation();
+            updateState(!isOpen);
+        });
+        header.dataset.viewedSourcesAttached = 'true';
+    }
     updateState(isOpen, false);
 };
 
@@ -406,7 +421,7 @@ export const rehydrateViewedSourcesToggles = (root: HTMLElement | null) => {
         const caret = findCaretNode(header);
         const list = header.nextElementSibling as HTMLElement | null;
         if (!caret || !list) return;
-        attachViewedSourcesToggle(caret, list);
+        attachViewedSourcesToggle(caret, list, undefined, header);
         processed.add(header);
     };
 
@@ -720,9 +735,10 @@ export const buildSearchResultsBlock = async (
     const outputContainer = document.createElement('div');
     outputContainer.dataset.aiOutput = 'true';
     outputContainer.dataset.aiOutputCollapsed = 'false';
+    outputContainer.dataset.aiOutputGeneratedAt = new Date().toISOString();
 
     outputContainer.appendChild(createAiOutputSpacer());
-    const toggle = createAiOutputToggle();
+    const toggle = createAiOutputToggle(outputContainer.dataset.aiOutputGeneratedAt);
     outputContainer.appendChild(toggle);
     outputContainer.appendChild(createAiOutputSpacer());
 
@@ -796,7 +812,7 @@ export const buildSearchResultsBlock = async (
         // Sources list container (initially hidden)
         const listContainer = document.createElement('div');
         listContainer.style.display = 'none';
-        attachViewedSourcesToggle(icon, listContainer, false);
+        attachViewedSourcesToggle(icon, listContainer, false, headerPara);
 
         // Each source using the unified component
         infoItems.forEach((item) => {

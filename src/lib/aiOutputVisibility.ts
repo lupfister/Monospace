@@ -3,6 +3,8 @@ import { isAiTextSpan, isHumanTextSpan } from './textStyles';
 const AI_HIDE_DURATION = 300; // ms
 const AI_HIDE_SCALE = 0.7;
 const AI_HIDE_SHIFT_Y = -6; // px
+const BODY_SQUASH_SCALE = 0.88;
+const BODY_BLUR = 4; // px
 
 const removeAttributeFromAll = (root: HTMLElement, selector: string, attr: string) => {
   root.querySelectorAll(selector).forEach((el) => {
@@ -165,21 +167,21 @@ const clearAnimStyles = (el: HTMLElement) => {
   for (const prop of ANIM_PROPS) el.style.removeProperty(prop);
 };
 
-const createAnimationClone = (el: HTMLElement, rect: DOMRect) => {
-  const clone = el.cloneNode(true) as HTMLElement;
-  clone.setAttribute('data-ai-anim-clone', 'true');
-  clone.contentEditable = 'false';
-  clone.style.position = 'fixed';
-  clone.style.left = `${rect.left}px`;
-  clone.style.top = `${rect.top}px`;
-  clone.style.width = `${rect.width}px`;
-  clone.style.height = `${rect.height}px`;
-  clone.style.margin = '0';
-  clone.style.pointerEvents = 'none';
-  clone.style.transformOrigin = 'top';
-  clone.style.zIndex = '1000';
-  document.body.appendChild(clone);
-  return clone;
+const animateBodyReveal = (body: HTMLElement, duration: number) => {
+  body.style.willChange = 'opacity, filter, transform';
+  body.style.transformOrigin = 'top';
+  body.style.opacity = '0';
+  body.style.filter = `blur(${BODY_BLUR}px)`;
+  body.style.transform = `scaleY(${BODY_SQUASH_SCALE})`;
+  void body.offsetHeight;
+  body.style.transition = [
+    `opacity ${duration}ms ease-out`,
+    `filter ${duration}ms ease-out`,
+    `transform ${duration}ms ease-out`,
+  ].join(', ');
+  body.style.opacity = '1';
+  body.style.filter = 'blur(0px)';
+  body.style.transform = 'scaleY(1)';
 };
 
 /**
@@ -216,46 +218,19 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
   // ── Measure ──────────────────────────────────────────────────────
   ensureAiLinebreaks(body);
   const startHeight = body.offsetHeight;
-  const persistentStart = new Map<HTMLElement, DOMRect>();
-  const toHideRects = new Map<HTMLElement, DOMRect>();
-  for (const el of persistent) persistentStart.set(el, el.getBoundingClientRect());
-  for (const el of toHide) toHideRects.set(el, el.getBoundingClientRect());
-
-  const clones: HTMLElement[] = [];
-  for (const el of toHide) {
-    const rect = toHideRects.get(el);
-    if (!rect) continue;
-    clones.push(createAnimationClone(el, rect));
-  }
-
   applyAiHiddenState(body, { preserveLinebreaks: true });
   const targetHeight = body.offsetHeight;
-  const persistentEnd = new Map<HTMLElement, DOMRect>();
-  for (const el of persistent) persistentEnd.set(el, el.getBoundingClientRect());
-  const persistentDeltas = new Map<HTMLElement, { x: number; y: number }>();
-  for (const el of persistent) {
-    const startRect = persistentStart.get(el);
-    const endRect = persistentEnd.get(el);
-    if (!startRect || !endRect) continue;
-    const dx = startRect.left - endRect.left;
-    const dy = startRect.top - endRect.top;
-    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
-      persistentDeltas.set(el, { x: dx, y: dy });
-    }
-  }
+  clearAiHiddenState(body, { preserveLinebreaks: true });
 
   // ── Lock starting state ──────────────────────────────────────────
   // Body container — controls external layout
   body.style.height = startHeight + 'px';
   body.style.overflow = 'hidden';
-  body.style.willChange = 'height';
-
-  for (const el of persistent) {
-    const delta = persistentDeltas.get(el);
-    if (!delta) continue;
-    el.style.transform = `translate(${delta.x}px, ${delta.y}px)`;
-    el.style.willChange = 'transform';
-  }
+  body.style.willChange = 'height, transform, opacity, filter';
+  body.style.transformOrigin = 'top';
+  body.style.transform = 'scaleY(1)';
+  body.style.opacity = '1';
+  body.style.filter = 'blur(0px)';
 
   void body.offsetHeight;                       // commit starting values
 
@@ -264,32 +239,24 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
   const ease = 'cubic-bezier(0.4, 0, 0.2, 1)';
 
   requestAnimationFrame(() => {
-    body.style.transition = `height ${dur}ms ${ease}`;
+    body.style.transition = [
+      `height ${dur}ms ${ease}`,
+      `transform ${dur}ms ${ease}`,
+      `opacity ${dur}ms ${ease}`,
+      `filter ${dur}ms ${ease}`,
+    ].join(', ');
     body.style.height = targetHeight + 'px';
-
-    for (const el of persistent) {
-      if (!persistentDeltas.has(el)) continue;
-      el.style.transition = `transform ${dur}ms ${ease}`;
-      el.style.transform = 'translate(0px, 0px)';
-    }
-
-    clones.forEach((clone) => {
-      clone.style.transition = [
-        `opacity ${Math.round(dur * 0.55)}ms ease-out`,
-        `filter ${dur}ms ease-out`,
-        `transform ${dur}ms ease-out`,
-      ].join(', ');
-      clone.style.opacity = '0';
-      clone.style.filter = 'blur(4px)';
-      clone.style.transform = `scaleY(${AI_HIDE_SCALE}) translateY(${AI_HIDE_SHIFT_Y}px)`;
-    });
+    body.style.transform = `scaleY(${BODY_SQUASH_SCALE})`;
+    body.style.opacity = '0';
+    body.style.filter = `blur(${BODY_BLUR}px)`;
   });
 
   // ── Cleanup ──────────────────────────────────────────────────────
   setTimeout(() => {
+    applyAiHiddenState(body, { preserveLinebreaks: true });
     clearAnimStyles(body);
-    for (const el of persistent) clearAnimStyles(el);
-    clones.forEach((clone) => clone.remove());
+    body.style.overflow = 'visible';
+    animateBodyReveal(body, Math.round(dur * 0.6));
     onComplete?.();
   }, dur + 20);
 };
@@ -329,45 +296,18 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
 
   // ── Measure ──────────────────────────────────────────────────────
   const startHeight = body.offsetHeight;
-  const persistentStart = new Map<HTMLElement, DOMRect>();
-  for (const el of persistent) persistentStart.set(el, el.getBoundingClientRect());
-
   clearAiHiddenState(body, { preserveLinebreaks: true });
-
   const targetHeight = body.offsetHeight;
-  const persistentEnd = new Map<HTMLElement, DOMRect>();
-  for (const el of persistent) persistentEnd.set(el, el.getBoundingClientRect());
-  const persistentDeltas = new Map<HTMLElement, { x: number; y: number }>();
-  for (const el of persistent) {
-    const startRect = persistentStart.get(el);
-    const endRect = persistentEnd.get(el);
-    if (!startRect || !endRect) continue;
-    const dx = startRect.left - endRect.left;
-    const dy = startRect.top - endRect.top;
-    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
-      persistentDeltas.set(el, { x: dx, y: dy });
-    }
-  }
+  applyAiHiddenState(body, { preserveLinebreaks: true });
 
   // ── Lock starting state ──────────────────────────────────────────
   body.style.height = startHeight + 'px';
-  body.style.overflow = 'visible';
-  body.style.willChange = 'height';
-
-  for (const el of persistent) {
-    const delta = persistentDeltas.get(el);
-    if (!delta) continue;
-    el.style.transform = `translate(${delta.x}px, ${delta.y}px)`;
-    el.style.willChange = 'transform';
-  }
-
-  for (const el of toShow) {
-    el.style.opacity = '0';
-    el.style.filter = 'blur(4px)';
-    el.style.transform = `scaleY(${AI_HIDE_SCALE}) translateY(${AI_HIDE_SHIFT_Y}px)`;
-    el.style.transformOrigin = 'top';
-    el.style.willChange = 'opacity, filter, transform';
-  }
+  body.style.overflow = 'hidden';
+  body.style.willChange = 'height, transform, opacity, filter';
+  body.style.transformOrigin = 'top';
+  body.style.transform = 'scaleY(1)';
+  body.style.opacity = '1';
+  body.style.filter = 'blur(0px)';
 
   void body.offsetHeight;                       // commit starting values
 
@@ -376,34 +316,25 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
   const ease = 'cubic-bezier(0.4, 0, 0.2, 1)';
 
   requestAnimationFrame(() => {
-    body.style.transition = `height ${dur}ms ${ease}`;
+    body.style.transition = [
+      `height ${dur}ms ${ease}`,
+      `transform ${dur}ms ${ease}`,
+      `opacity ${dur}ms ${ease}`,
+      `filter ${dur}ms ${ease}`,
+    ].join(', ');
     body.style.height = targetHeight + 'px';
-
-    for (const el of persistent) {
-      if (!persistentDeltas.has(el)) continue;
-      el.style.transition = `transform ${dur}ms ${ease}`;
-      el.style.transform = 'translate(0px, 0px)';
-    }
-
-    for (const el of toShow) {
-      el.style.transition = [
-        `opacity ${Math.round(dur * 0.7)}ms ease-in ${Math.round(dur * 0.15)}ms`,
-        `filter ${dur}ms ease-in`,
-        `transform ${dur}ms ease-in`,
-      ].join(', ');
-      el.style.opacity = '1';
-      el.style.filter = 'blur(0px)';
-      el.style.transform = 'scaleY(1) translateY(0px)';
-    }
+    body.style.transform = `scaleY(${BODY_SQUASH_SCALE})`;
+    body.style.opacity = '0';
+    body.style.filter = `blur(${BODY_BLUR}px)`;
   });
 
   // ── Cleanup ──────────────────────────────────────────────────────
   setTimeout(() => {
-    for (const el of toShow) clearAnimStyles(el);
     requestAnimationFrame(() => {
+      clearAiHiddenState(body, { preserveLinebreaks: true });
       clearAnimStyles(body);
-      for (const el of persistent) clearAnimStyles(el);
-      clearAiHiddenState(body);
+      body.style.overflow = 'visible';
+      animateBodyReveal(body, Math.round(dur * 0.6));
       onComplete?.();
     });
   }, dur + 20);

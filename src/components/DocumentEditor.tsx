@@ -67,6 +67,14 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     return container.getAttribute('data-ai-output-collapsed') === 'true' ? container : null;
   };
 
+  const isSelectionInCollapsedOutput = (range: Range): boolean => {
+    return Boolean(
+      getCollapsedAiOutputContainer(range.startContainer) ||
+      getCollapsedAiOutputContainer(range.endContainer) ||
+      getCollapsedAiOutputContainer(range.commonAncestorContainer)
+    );
+  };
+
   const setAiOutputCollapsed = useCallback((container: HTMLElement, collapsed: boolean) => {
     const body = container.querySelector('[data-ai-output-body="true"]') as HTMLElement | null;
     if (!body) return;
@@ -847,6 +855,9 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       const selection = window.getSelection();
       if (selection && !selection.isCollapsed && editorRef.current) {
         const range = selection.getRangeAt(0);
+        if (isSelectionInCollapsedOutput(range)) {
+          return;
+        }
 
         // Check if selection involves AI text
         const container = range.commonAncestorContainer;

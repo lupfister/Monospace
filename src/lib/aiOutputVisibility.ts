@@ -12,39 +12,15 @@ const removeAttributeFromAll = (root: HTMLElement, selector: string, attr: strin
   });
 };
 
-export const clearAiHiddenState = (root: HTMLElement, options: { preserveLinebreaks?: boolean } = {}) => {
+export const clearAiHiddenState = (root: HTMLElement) => {
   removeAttributeFromAll(root, '[data-ai-hidden="true"]', 'data-ai-hidden');
   removeAttributeFromAll(root, '[data-ai-contains-highlight="true"]', 'data-ai-contains-highlight');
   removeAttributeFromAll(root, '[data-ai-show-highlight="true"]', 'data-ai-show-highlight');
-  if (!options.preserveLinebreaks) {
-    root.querySelectorAll('[data-ai-linebreak="true"]').forEach((linebreak) => linebreak.remove());
-  }
   root.querySelectorAll('[data-ai-highlight-clone="true"]').forEach((clone) => clone.remove());
 };
 
-const ensureAiLinebreaks = (root: HTMLElement) => {
-  const visibleUnits = Array.from(root.querySelectorAll('[data-ai-highlighted="true"], [data-human-text="true"]')) as HTMLElement[];
-  visibleUnits.forEach((el, index) => {
-    if (index === visibleUnits.length - 1) return;
-    const next = el.nextSibling as HTMLElement | null;
-    if (next && next.nodeType === Node.ELEMENT_NODE && (next as HTMLElement).getAttribute('data-ai-linebreak') === 'true') {
-      return;
-    }
-    const spacer = document.createElement('span');
-    spacer.setAttribute('data-ai-linebreak', 'true');
-    spacer.style.display = 'block';
-    spacer.style.whiteSpace = 'pre-wrap';
-    const computed = window.getComputedStyle(el);
-    spacer.style.fontFamily = computed.fontFamily;
-    spacer.style.fontSize = computed.fontSize;
-    spacer.style.lineHeight = computed.lineHeight;
-    spacer.textContent = '\n';
-    el.parentNode?.insertBefore(spacer, el.nextSibling);
-  });
-};
-
-export const applyAiHiddenState = (root: HTMLElement, options: { preserveLinebreaks?: boolean } = {}) => {
-  clearAiHiddenState(root, options);
+export const applyAiHiddenState = (root: HTMLElement) => {
+  clearAiHiddenState(root);
 
   const aiNodes = new Set<HTMLElement>();
   root
@@ -143,7 +119,6 @@ export const applyAiHiddenState = (root: HTMLElement, options: { preserveLinebre
     block.setAttribute('data-ai-show-highlight', 'true');
   });
 
-  ensureAiLinebreaks(root);
 };
 
 /** Check whether an element (or its descendants) contains persistent content. */
@@ -216,11 +191,10 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
   }
 
   // ── Measure ──────────────────────────────────────────────────────
-  ensureAiLinebreaks(body);
   const startHeight = body.offsetHeight;
-  applyAiHiddenState(body, { preserveLinebreaks: true });
+  applyAiHiddenState(body);
   const targetHeight = body.offsetHeight;
-  clearAiHiddenState(body, { preserveLinebreaks: true });
+  clearAiHiddenState(body);
 
   // ── Lock starting state ──────────────────────────────────────────
   // Body container — controls external layout
@@ -253,7 +227,7 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
 
   // ── Cleanup ──────────────────────────────────────────────────────
   setTimeout(() => {
-    applyAiHiddenState(body, { preserveLinebreaks: true });
+    applyAiHiddenState(body);
     clearAnimStyles(body);
     body.style.overflow = 'visible';
     animateBodyReveal(body, Math.round(dur * 0.6));
@@ -296,9 +270,9 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
 
   // ── Measure ──────────────────────────────────────────────────────
   const startHeight = body.offsetHeight;
-  clearAiHiddenState(body, { preserveLinebreaks: true });
+  clearAiHiddenState(body);
   const targetHeight = body.offsetHeight;
-  applyAiHiddenState(body, { preserveLinebreaks: true });
+  applyAiHiddenState(body);
 
   // ── Lock starting state ──────────────────────────────────────────
   body.style.height = startHeight + 'px';
@@ -331,7 +305,7 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
   // ── Cleanup ──────────────────────────────────────────────────────
   setTimeout(() => {
     requestAnimationFrame(() => {
-      clearAiHiddenState(body, { preserveLinebreaks: true });
+      clearAiHiddenState(body);
       clearAnimStyles(body);
       body.style.overflow = 'visible';
       animateBodyReveal(body, Math.round(dur * 0.6));

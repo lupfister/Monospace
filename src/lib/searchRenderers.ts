@@ -9,7 +9,7 @@ import { SkeletonNotes, SkeletonNoteBlock, AiError, exploreSource } from './open
 /**
  * RENDERER RULES:
  * 1. ALWAYS work with the text editing document paradigm.
- * 2. Avoid CSS-based gaps (margins/padding) for vertical rhythm. Use text flow, <br>, or empty lines.
+ * 2. Use paragraph margins for vertical rhythm; avoid inserting adaptive empty lines.
  * 3. Maintain a consistent line-height of 1.5.
  * 4. Content should allow for natural cursor movement and text selection.
  */
@@ -445,6 +445,7 @@ export const rehydrateViewedSourcesToggles = (root: HTMLElement | null) => {
  */
 const createInteractiveSourceItem = (url: string, label: string, initialContext: string = ''): HTMLDivElement => {
     const container = document.createElement('div');
+    container.style.margin = '0';
     // container.style.marginBottom = '8px'; // Removed spacer gap
 
     // Container for AI summary (inserted above link)
@@ -523,7 +524,6 @@ const createInteractiveSourceItem = (url: string, label: string, initialContext:
             if (result.ok && result.text) {
                 // Success: Append a new paragraph with the result text
                 const p = document.createElement('p');
-                p.style.margin = '0'; // Strict: No margin
 
                 // Final safety cleanup of any stray markdown links or raw URLs
                 const cleanText = result.text
@@ -707,7 +707,7 @@ export const createInlineResultCard = (item: ResultItem): DocumentFragment => {
         if (item.url) {
             const articleLabel = item.title || 'Open article';
             const linkWrapper = document.createElement('div');
-            linkWrapper.appendChild(document.createElement('br'));
+            linkWrapper.style.marginTop = '0';
             linkWrapper.appendChild(createStyledSourceLink(item.url, articleLabel));
             container.appendChild(linkWrapper);
         }
@@ -722,8 +722,10 @@ const createSpacer = () => {
     const el = document.createElement('p');
     el.dataset.aiText = 'true';
     el.dataset.aiOrigin = 'true';
+    el.dataset.aiOutputSpacer = 'true';
     el.style.lineHeight = '1.5';
     el.style.minHeight = '1.5em';
+    el.style.margin = '0';
     el.appendChild(document.createElement('br'));
     return el;
 };
@@ -932,6 +934,7 @@ export const buildSearchResultsBlock = async (
             excerptP.dataset.aiText = 'true';
             excerptP.dataset.aiOrigin = 'true';
             excerptP.style.lineHeight = '1.5';
+            excerptP.style.margin = '0';
 
             const excerptSpan = createAiTextSpan(excerptText);
             excerptSpan.style.fontStyle = 'italic';
@@ -945,6 +948,7 @@ export const buildSearchResultsBlock = async (
                 linkWrapper.dataset.aiText = 'true';
                 linkWrapper.dataset.aiOrigin = 'true';
                 linkWrapper.style.lineHeight = '1.5';
+                linkWrapper.style.margin = '0';
 
                 // Use the interactive source item
                 linkWrapper.appendChild(createInteractiveSourceItem(

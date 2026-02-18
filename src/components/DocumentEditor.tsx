@@ -10,7 +10,6 @@ import { useSearchAgent } from '../hooks/useSearchAgent';
 import { MarginTextContainer, MarginTextData } from './MarginTextContainer';
 import { OPENAI_MODEL_OPTIONS } from '../lib/openaiAgentApi';
 import { generateWithOpenAI } from '../lib/openaiAgentApi';
-import { LineHeightHandle } from './LineHeightHandle';
 import { rehydrateViewedSourcesToggles } from '../lib/searchRenderers';
 import type { LocalDocument } from '../lib/localDocuments';
 
@@ -44,12 +43,6 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
   const [isShiftSelecting, setIsShiftSelecting] = useState(false);
   const shiftSelectStart = useRef<{ x: number; y: number } | null>(null);
   const lastKnownRange = useRef<Range | null>(null);
-
-  // Line height handle state
-  const [lineHeightHandlePos, setLineHeightHandlePos] = useState<{ top: number; left: number; height: number } | null>(null);
-  const [isDraggingLineHeight, setIsDraggingLineHeight] = useState(false);
-  const [currentBlock, setCurrentBlock] = useState<HTMLElement | null>(null);
-  const lineHeightDragStart = useRef<{ y: number; initialHeight: number } | null>(null);
 
   const [selectedModel, setSelectedModel] = useState('gpt-4o-mini');
   const [isTitleGenerating, setIsTitleGenerating] = useState(false);
@@ -1708,7 +1701,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
             ref={editorRef}
             contentEditable
             suppressContentEditableWarning
-            className="min-h-screen bg-white p-8 focus:outline-none prose prose-lg max-w-3xl mx-auto font-normal [&_p]:my-0 [&_p]:min-h-[1.5em] whitespace-pre-wrap"
+            className="min-h-screen bg-white p-8 focus:outline-none prose prose-lg max-w-3xl mx-auto font-normal [&_p]:my-3 [&_p]:min-h-[1.5em] [&_p[data-ai-output-toggle='true']]:my-0 [&_p[data-ai-output-spacer='true']]:my-0 whitespace-pre-wrap"
             spellCheck
             onMouseDown={handleMouseDown}
             onClick={handleClick}
@@ -1784,12 +1777,6 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
             display: inline;
           }
 
-          [data-ai-linebreak="true"] {
-            display: block;
-            white-space: pre-wrap;
-          }
-
-
           [data-ai-highlight-clone="true"] {
             display: block;
             font-family: inherit;
@@ -1800,8 +1787,6 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
           }
         `
       }} />
-
-      <LineHeightHandle editorRef={editorRef} />
     </div>
   );
 }

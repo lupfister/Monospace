@@ -86,7 +86,17 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     const body = container.querySelector('[data-ai-output-body="true"]') as HTMLElement | null;
     if (!body) return;
 
+    if (animate) {
+      container.setAttribute('data-ai-output-animating', 'true');
+    } else {
+      container.removeAttribute('data-ai-output-animating');
+    }
+
     container.setAttribute('data-ai-output-collapsed', collapsed ? 'true' : 'false');
+
+    const finishAnimation = () => {
+      container.removeAttribute('data-ai-output-animating');
+    };
 
     // Helper: apply all toggle / header / spacer / label UI changes
     const applyUiChanges = () => {
@@ -149,13 +159,14 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         // HIDE: animate body collapse first, then apply DOM changes + hidden state
         animateAiHide(body, () => {
           applyUiChanges();
+          finishAnimation();
         });
       } else {
         // SHOW: clear hidden state + apply UI changes first so we can measure,
         // then animate the body expanding from 0
         clearAiHiddenState(body);
         applyUiChanges();
-        animateAiShow(body);
+        animateAiShow(body, finishAnimation);
       }
     } else {
       if (collapsed) {
@@ -164,6 +175,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         clearAiHiddenState(body);
       }
       applyUiChanges();
+      finishAnimation();
     }
 
     const icon = container.querySelector('[data-ai-output-icon="true"]') as HTMLElement | null;
@@ -323,6 +335,31 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     });
   }, [setAiOutputCollapsed]);
 
+  const ensureHighlightVisibility = useCallback((root: HTMLElement) => {
+    const highlights = Array.from(root.querySelectorAll('[data-ai-highlighted="true"]')) as HTMLElement[];
+    highlights.forEach((highlight) => {
+      highlight.removeAttribute('data-ai-hidden');
+      let node = highlight.parentElement;
+      while (node && node !== root) {
+        if (node.getAttribute('data-ai-hidden') === 'true') {
+          node.setAttribute('data-ai-contains-highlight', 'true');
+        }
+        node = node.parentElement;
+      }
+    });
+  }, []);
+
+  const rehydrateAiOutputs = useCallback(() => {
+    const root = editorRef.current;
+    if (!root) return;
+    const outputs = Array.from(root.querySelectorAll('[data-ai-output="true"]')) as HTMLElement[];
+    outputs.forEach((output) => {
+      const collapsed = output.getAttribute('data-ai-output-collapsed') === 'true';
+      setAiOutputCollapsed(output, collapsed, false);
+    });
+    ensureHighlightVisibility(root);
+  }, [ensureHighlightVisibility, setAiOutputCollapsed]);
+
   const handleAiOutputInserted = useCallback((outputContainer: HTMLElement) => {
     const root = editorRef.current;
     if (!root) return;
@@ -456,6 +493,10 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     if (!editorRef.current) return;
     if (!doc.content || isPlaceholderHtml(doc.content)) return;
 
+    if (editorRef.current.innerHTML === doc.content) {
+      return;
+    }
+
     editorRef.current.innerHTML = doc.content;
     requestAnimationFrame(() => {
       if (!editorRef.current) return;
@@ -476,6 +517,10 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
             label.textContent = getAiOutputLabelText(container, collapsed);
           }
         }
+        toggle.removeAttribute('data-ai-hidden');
+        toggle.querySelectorAll<HTMLElement>('[data-ai-hidden="true"]').forEach((el) => {
+          el.removeAttribute('data-ai-hidden');
+        });
       });
 
       // Tag existing AI text
@@ -485,6 +530,8 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
       const spans = editorRef.current.querySelectorAll('span');
       spans.forEach((span: HTMLSpanElement) => {
+        if (span.closest('[data-ai-output-toggle="true"]')) return;
+        if (span.getAttribute('data-ai-highlighted') === 'true') return;
         if (isAiTextSpan(span) || span.querySelector('svg')) { // Simple check for likely AI text or source links
           if (isAiTextSpan(span) || span.getAttribute('role') === 'link') {
             span.setAttribute('data-ai-text', 'true');
@@ -498,6 +545,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
                 if (node.nodeType === Node.ELEMENT_NODE) {
                   const el = node as HTMLElement;
                   if (el.tagName === 'BR') return true;
+                  if (el.getAttribute('data-ai-highlighted') === 'true') return true;
                   return el.getAttribute('data-ai-origin') === 'true' || isAiTextSpan(el);
                 }
                 return false;
@@ -510,14 +558,14 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         }
       });
 
-      refreshCollapsedAiOutputs();
+      rehydrateAiOutputs();
     });
-  }, [doc.content, hydrateSearchResultImages, isPlaceholderHtml, normalizeContent, refreshCollapsedAiOutputs, rehydrateViewedSourcesToggles]);
+  }, [doc.content, hydrateSearchResultImages, isPlaceholderHtml, normalizeContent, rehydrateAiOutputs, rehydrateViewedSourcesToggles]);
 
 
   useEffect(() => {
-    refreshCollapsedAiOutputs();
-  }, [refreshCollapsedAiOutputs]);
+    rehydrateAiOutputs();
+  }, [rehydrateAiOutputs]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1736,8 +1784,8 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
             display: inline;
           }
 
-          [data-ai-output-collapsed="true"] [data-ai-highlighted="true"],
-          [data-ai-output-collapsed="true"] [data-human-text="true"] {
+          [data-ai-output-collapsed="true"]:not([data-ai-output-animating="true"]) [data-ai-highlighted="true"],
+          [data-ai-output-collapsed="true"]:not([data-ai-output-animating="true"]) [data-human-text="true"] {
             display: block;
           }
 

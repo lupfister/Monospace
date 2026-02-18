@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { MoveHorizontal, Sparkles, Loader2 } from 'lucide-react';
 import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan } from '../lib/textStyles';
 import { isProbablyUrl } from '../lib/linkPreviews';
-import { applyAiHiddenState, clearAiHiddenState } from '../lib/aiOutputVisibility';
+import { applyAiHiddenState, clearAiHiddenState, animateAiHide, animateAiShow } from '../lib/aiOutputVisibility';
 import { formatAiOutputLabel } from '../lib/aiOutputLabel';
 
 import { useLinkHydrator } from '../hooks/useLinkHydrator';
@@ -82,69 +82,88 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     );
   };
 
-  const setAiOutputCollapsed = useCallback((container: HTMLElement, collapsed: boolean) => {
+  const setAiOutputCollapsed = useCallback((container: HTMLElement, collapsed: boolean, animate = true) => {
     const body = container.querySelector('[data-ai-output-body="true"]') as HTMLElement | null;
     if (!body) return;
 
     container.setAttribute('data-ai-output-collapsed', collapsed ? 'true' : 'false');
 
-    if (collapsed) {
-      applyAiHiddenState(body);
-    } else {
-      clearAiHiddenState(body);
-    }
+    // Helper: apply all toggle / header / spacer / label UI changes
+    const applyUiChanges = () => {
+      const toggle = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
+      const spacer = container.querySelector('[data-ai-output-spacer="true"]') as HTMLElement | null;
+      const header = body.querySelector(VIEWED_SOURCES_HEADER_SELECTOR) as HTMLElement | null;
+      const sourcesContainer = header?.parentElement ?? null;
+      const hasReplacementToggle = container.getAttribute('data-ai-toggle-replaces-sources') === 'true';
 
-    const toggle = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
-    const spacer = container.querySelector('[data-ai-output-spacer="true"]') as HTMLElement | null;
-    const header = body.querySelector(VIEWED_SOURCES_HEADER_SELECTOR) as HTMLElement | null;
-    const sourcesContainer = header?.parentElement ?? null;
-    const hasReplacementToggle = container.getAttribute('data-ai-toggle-replaces-sources') === 'true';
-
-    if (collapsed) {
-      if (header) {
-        container.setAttribute('data-ai-toggle-replaces-sources', 'true');
-      }
-      if (header) {
-        header.style.display = 'none';
-      }
-      if (toggle && sourcesContainer) {
-        sourcesContainer.parentElement?.insertBefore(toggle, sourcesContainer);
-        toggle.style.display = 'inline-flex';
-      } else if (toggle) {
-        toggle.style.display = 'inline-flex';
-      }
-      if (spacer) spacer.style.display = 'none';
-    } else {
-      if (hasReplacementToggle) {
-        if (header) header.style.display = 'inline-flex';
-        if (toggle) toggle.style.display = 'inline-flex';
+      if (collapsed) {
+        if (header) {
+          container.setAttribute('data-ai-toggle-replaces-sources', 'true');
+        }
+        if (header) {
+          header.style.display = 'none';
+        }
+        if (toggle && sourcesContainer) {
+          sourcesContainer.parentElement?.insertBefore(toggle, sourcesContainer);
+          toggle.style.display = 'inline-flex';
+        } else if (toggle) {
+          toggle.style.display = 'inline-flex';
+        }
         if (spacer) spacer.style.display = 'none';
       } else {
-        if (header) {
-          header.style.display = 'inline-flex';
+        if (hasReplacementToggle) {
+          if (header) header.style.display = 'inline-flex';
+          if (toggle) toggle.style.display = 'inline-flex';
+          if (spacer) spacer.style.display = 'none';
+        } else {
+          if (header) {
+            header.style.display = 'inline-flex';
+          }
+          if (toggle) {
+            container.insertBefore(toggle, container.firstChild);
+            toggle.style.display = 'none';
+          }
         }
-        if (toggle) {
-          container.insertBefore(toggle, container.firstChild);
-          toggle.style.display = 'none';
-        }
+        if (!hasReplacementToggle && spacer) spacer.style.display = '';
       }
-      if (!hasReplacementToggle && spacer) spacer.style.display = '';
-    }
 
-    const label = container.querySelector('[data-ai-output-label="true"]') as HTMLElement | null;
-    if (label) {
-      label.textContent = getAiOutputLabelText(container, collapsed);
-    } else if (toggle) {
-      const fallbackLabel = document.createElement('span');
-      fallbackLabel.dataset.aiOutputLabel = 'true';
-      fallbackLabel.dataset.aiUi = 'true';
-      fallbackLabel.textContent = getAiOutputLabelText(container, collapsed);
-      fallbackLabel.contentEditable = 'false';
-      toggle.appendChild(fallbackLabel);
-    }
+      const label = container.querySelector('[data-ai-output-label="true"]') as HTMLElement | null;
+      if (label) {
+        label.textContent = getAiOutputLabelText(container, collapsed);
+      } else if (toggle) {
+        const fallbackLabel = document.createElement('span');
+        fallbackLabel.dataset.aiOutputLabel = 'true';
+        fallbackLabel.dataset.aiUi = 'true';
+        fallbackLabel.textContent = getAiOutputLabelText(container, collapsed);
+        fallbackLabel.contentEditable = 'false';
+        toggle.appendChild(fallbackLabel);
+      }
 
-    if (toggle) {
-      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      if (toggle) {
+        toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      }
+    };
+
+    if (animate) {
+      if (collapsed) {
+        // HIDE: animate body collapse first, then apply DOM changes + hidden state
+        animateAiHide(body, () => {
+          applyUiChanges();
+        });
+      } else {
+        // SHOW: clear hidden state + apply UI changes first so we can measure,
+        // then animate the body expanding from 0
+        clearAiHiddenState(body);
+        applyUiChanges();
+        animateAiShow(body);
+      }
+    } else {
+      if (collapsed) {
+        applyAiHiddenState(body);
+      } else {
+        clearAiHiddenState(body);
+      }
+      applyUiChanges();
     }
 
     const icon = container.querySelector('[data-ai-output-icon="true"]') as HTMLElement | null;
@@ -300,7 +319,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     if (!root) return;
     const collapsedOutputs = Array.from(root.querySelectorAll('[data-ai-output="true"][data-ai-output-collapsed="true"]')) as HTMLElement[];
     collapsedOutputs.forEach((output) => {
-      setAiOutputCollapsed(output, true);
+      setAiOutputCollapsed(output, true, false);
     });
   }, [setAiOutputCollapsed]);
 

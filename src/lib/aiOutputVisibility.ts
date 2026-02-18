@@ -1,5 +1,7 @@
 import { isAiTextSpan, isHumanTextSpan } from './textStyles';
 
+const AI_HIDE_DURATION = 300; // ms
+
 const removeAttributeFromAll = (root: HTMLElement, selector: string, attr: string) => {
   root.querySelectorAll(selector).forEach((el) => {
     (el as HTMLElement).removeAttribute(attr);
@@ -111,4 +113,149 @@ export const applyAiHiddenState = (root: HTMLElement) => {
     spacer.textContent = '\n';
     el.parentNode?.insertBefore(spacer, el.nextSibling);
   });
+};
+
+/** Check whether an element (or its descendants) contains persistent content. */
+const hasPersistentContent = (el: HTMLElement): boolean =>
+  el.getAttribute('data-ai-highlighted') === 'true' ||
+  el.getAttribute('data-human-text') === 'true' ||
+  el.getAttribute('data-ai-ui') === 'true' ||
+  el.getAttribute('data-ai-output-toggle') === 'true' ||
+  el.querySelector('[data-ai-highlighted="true"], [data-human-text="true"], [data-ai-ui="true"], [data-ai-output-toggle="true"]') !== null;
+
+/** Clean up per-element animation inline styles. */
+const clearElementAnimationStyles = (el: HTMLElement) => {
+  for (const prop of ['height', 'overflow', 'opacity', 'transition', 'will-change',
+    'margin-top', 'margin-bottom', 'padding-top', 'padding-bottom', 'min-height']) {
+    el.style.removeProperty(prop);
+  }
+};
+
+/**
+ * Animate hiding AI content by collapsing individual AI-only children
+ * of the body. Persistent content (highlighted text, human text, toggle)
+ * stays visible and smoothly slides into position as surrounding
+ * AI elements shrink away.
+ */
+export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
+  const children = Array.from(body.children) as HTMLElement[];
+
+  // Separate AI-only elements (will collapse) from persistent ones (stay)
+  const toHide: HTMLElement[] = [];
+  for (const child of children) {
+    if (!hasPersistentContent(child)) {
+      toHide.push(child);
+    }
+  }
+
+  if (toHide.length === 0) {
+    applyAiHiddenState(body);
+    onComplete?.();
+    return;
+  }
+
+  // Phase 1: lock current dimensions
+  for (const el of toHide) {
+    el.style.height = el.offsetHeight + 'px';
+    el.style.overflow = 'hidden';
+    el.style.opacity = '1';
+    el.style.willChange = 'height, opacity';
+  }
+
+  // Force reflow
+  void body.offsetHeight;
+
+  // Phase 2: animate to collapsed
+  const dur = AI_HIDE_DURATION;
+  for (const el of toHide) {
+    el.style.transition = [
+      `height ${dur}ms cubic-bezier(0.4, 0, 0.2, 1)`,
+      `opacity ${Math.round(dur * 0.6)}ms ease-out`,
+      `margin-top ${dur}ms cubic-bezier(0.4, 0, 0.2, 1)`,
+      `margin-bottom ${dur}ms cubic-bezier(0.4, 0, 0.2, 1)`,
+      `padding-top ${dur}ms cubic-bezier(0.4, 0, 0.2, 1)`,
+      `padding-bottom ${dur}ms cubic-bezier(0.4, 0, 0.2, 1)`,
+    ].join(', ');
+    el.style.height = '0px';
+    el.style.opacity = '0';
+    el.style.marginTop = '0px';
+    el.style.marginBottom = '0px';
+    el.style.paddingTop = '0px';
+    el.style.paddingBottom = '0px';
+    el.style.minHeight = '0px';
+  }
+
+  // Phase 3: cleanup after animation completes
+  setTimeout(() => {
+    for (const el of toHide) {
+      clearElementAnimationStyles(el);
+    }
+    applyAiHiddenState(body);
+    onComplete?.();
+  }, dur + 20);
+};
+
+/**
+ * Animate showing AI content by expanding individual AI elements.
+ * Assumes clearAiHiddenState has already been called on the body
+ * so that content is in the DOM and measurable.
+ */
+export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
+  // Ensure the body container is visible
+  body.style.removeProperty('display');
+
+  const children = Array.from(body.children) as HTMLElement[];
+
+  // Find AI content children to animate in
+  const toShow: HTMLElement[] = [];
+  for (const child of children) {
+    if (child.getAttribute('data-ai-ui') === 'true') continue;
+    if (child.getAttribute('data-ai-output-toggle') === 'true') continue;
+    const isAi =
+      child.getAttribute('data-ai-text') === 'true' ||
+      child.getAttribute('data-ai-origin') === 'true' ||
+      child.getAttribute('data-ai-question') === 'true';
+    if (isAi) toShow.push(child);
+  }
+
+  if (toShow.length === 0) {
+    onComplete?.();
+    return;
+  }
+
+  // Measure natural heights
+  const heights = new Map<HTMLElement, number>();
+  for (const el of toShow) {
+    heights.set(el, el.offsetHeight);
+  }
+
+  // Set starting state: collapsed
+  for (const el of toShow) {
+    el.style.height = '0px';
+    el.style.overflow = 'hidden';
+    el.style.opacity = '0';
+    el.style.willChange = 'height, opacity';
+    el.style.minHeight = '0px';
+  }
+
+  // Force reflow
+  void body.offsetHeight;
+
+  // Animate expansion
+  const dur = AI_HIDE_DURATION;
+  for (const el of toShow) {
+    el.style.transition = [
+      `height ${dur}ms cubic-bezier(0.4, 0, 0.2, 1)`,
+      `opacity ${Math.round(dur * 0.7)}ms ease-in ${Math.round(dur * 0.15)}ms`,
+    ].join(', ');
+    el.style.height = (heights.get(el) ?? 0) + 'px';
+    el.style.opacity = '1';
+  }
+
+  setTimeout(() => {
+    for (const el of toShow) {
+      clearElementAnimationStyles(el);
+    }
+    onComplete?.();
+  }, dur + 20);
 };

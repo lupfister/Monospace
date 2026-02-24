@@ -37,6 +37,7 @@ export const createAiTextSpan = (text: string, lineHeight?: string): HTMLSpanEle
   span.textContent = text;
   span.setAttribute('data-ai-text', 'true');
   span.setAttribute('data-ai-origin', 'true');
+  span.setAttribute('data-ai-generated-at', String(Date.now()));
   return span;
 };
 
@@ -83,8 +84,16 @@ export const createAiTextWithLinksFragment = (text: string, lineHeight?: string)
  */
 export const createStyledSourceLink = (url: string, label: string): HTMLElement => {
   const wrapper = document.createElement('span');
+  wrapper.dataset.sourceUrl = url;
+  wrapper.dataset.sourceLabel = label;
+  wrapper.dataset.sourceLink = 'true';
   wrapper.style.display = 'inline-flex';
   wrapper.style.alignItems = 'center';
+  wrapper.style.flex = '0 0 auto';
+  wrapper.style.alignSelf = 'flex-start';
+  wrapper.style.justifySelf = 'flex-start';
+  wrapper.style.width = 'max-content';
+  wrapper.style.maxWidth = 'min(100%, 480px)';
   wrapper.style.backgroundColor = 'var(--color-gray-100, #f3f4f6)';
   wrapper.style.borderRadius = '4px';
   wrapper.style.padding = '0px 5px';
@@ -94,10 +103,10 @@ export const createStyledSourceLink = (url: string, label: string): HTMLElement 
   wrapper.style.lineHeight = '1.5';
   wrapper.style.verticalAlign = 'middle';
   // wrapper.style.height = '1.2em'; // Removed fixed height for natural flow
-  wrapper.style.maxWidth = '480px'; // Prevent very long links from breaking layout, but allow more title visibility
   wrapper.style.overflow = 'hidden';
   wrapper.setAttribute('data-ai-text', 'true');
   wrapper.setAttribute('data-ai-origin', 'true');
+  wrapper.setAttribute('data-ai-generated-at', String(Date.now()));
 
   // Hover effect
   wrapper.onmouseenter = () => { wrapper.style.backgroundColor = 'var(--color-gray-200, #e5e7eb)'; };
@@ -105,6 +114,7 @@ export const createStyledSourceLink = (url: string, label: string): HTMLElement 
 
   // Icon (Left) - External Link
   const iconSpan = document.createElement('span');
+  iconSpan.dataset.sourceIcon = 'true';
   iconSpan.style.display = 'inline-flex';
   iconSpan.style.alignItems = 'center';
   iconSpan.style.justifyContent = 'center';
@@ -137,7 +147,7 @@ export const createStyledSourceLink = (url: string, label: string): HTMLElement 
   textSpan.style.whiteSpace = 'nowrap';
   textSpan.style.overflow = 'hidden';
   textSpan.style.textOverflow = 'ellipsis';
-  textSpan.style.flex = '1';
+  textSpan.style.flex = '0 1 auto';
   textSpan.style.minWidth = '0';
 
   wrapper.appendChild(iconSpan);
@@ -153,7 +163,55 @@ export const createStyledSourceLink = (url: string, label: string): HTMLElement 
     }
   };
 
+  attachedSourceLinks.add(wrapper);
   return wrapper;
+};
+
+const attachedSourceLinks = new WeakSet<HTMLElement>();
+
+export const rehydrateSourceLinks = (root: HTMLElement | null): void => {
+  if (!root) return;
+  const links = Array.from(root.querySelectorAll<HTMLElement>('[data-source-url]'));
+  links.forEach((wrapper) => {
+    if (attachedSourceLinks.has(wrapper)) return;
+    const url = wrapper.dataset.sourceUrl;
+    if (!url) return;
+
+    wrapper.style.display = 'inline-flex';
+    wrapper.style.alignItems = 'center';
+    wrapper.style.flex = '0 0 auto';
+    wrapper.style.alignSelf = 'flex-start';
+    wrapper.style.justifySelf = 'flex-start';
+    wrapper.style.width = 'max-content';
+    wrapper.style.maxWidth = 'min(100%, 480px)';
+    wrapper.style.overflow = 'hidden';
+
+    const label = wrapper.dataset.sourceLabel || wrapper.getAttribute('aria-label') || url;
+
+    const openLink = (e: MouseEvent | KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      window.open(url, '_blank', 'noopener,noreferrer');
+    };
+
+    wrapper.onmouseenter = () => { wrapper.style.backgroundColor = 'var(--color-gray-200, #e5e7eb)'; };
+    wrapper.onmouseleave = () => { wrapper.style.backgroundColor = 'var(--color-gray-100, #f3f4f6)'; };
+    wrapper.setAttribute('role', 'link');
+    wrapper.setAttribute('aria-label', label.startsWith('Open source:') ? label : `Open source: ${label}`);
+    wrapper.tabIndex = 0;
+    wrapper.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        openLink(e);
+      }
+    };
+
+    const icon = wrapper.querySelector<HTMLElement>('[data-source-icon="true"]');
+    if (icon) {
+      icon.onclick = openLink;
+    }
+
+    attachedSourceLinks.add(wrapper);
+  });
 };
 
 
@@ -173,6 +231,7 @@ export const createHumanTextSpan = (text: string, lineHeight?: string): HTMLSpan
   span.style.whiteSpace = 'pre-wrap';
   span.textContent = text;
   span.setAttribute('data-human-text', 'true');
+  span.setAttribute('data-human-updated-at', String(Date.now()));
   return span;
 };
 

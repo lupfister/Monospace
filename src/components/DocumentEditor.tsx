@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { MoveHorizontal, Sparkles, Loader2 } from 'lucide-react';
-import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan } from '../lib/textStyles';
+import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan, rehydrateSourceLinks } from '../lib/textStyles';
 import { isProbablyUrl } from '../lib/linkPreviews';
 import { applyAiHiddenState, clearAiHiddenState, animateAiHide, animateAiShow } from '../lib/aiOutputVisibility';
 import { formatAiOutputLabel } from '../lib/aiOutputLabel';
@@ -10,7 +10,8 @@ import { useSearchAgent } from '../hooks/useSearchAgent';
 import { MarginTextContainer, MarginTextData } from './MarginTextContainer';
 import { OPENAI_MODEL_OPTIONS } from '../lib/openaiAgentApi';
 import { generateWithOpenAI } from '../lib/openaiAgentApi';
-import { rehydrateViewedSourcesToggles } from '../lib/searchRenderers';
+import { rehydrateInteractiveSources, rehydrateViewedSourcesToggles } from '../lib/searchRenderers';
+import { persistViewedSourcesForDoc, persistViewedSourcesForOutput } from '../lib/aiOutputSources';
 import type { LocalDocument } from '../lib/localDocuments';
 
 type DocumentEditorProps = {
@@ -44,7 +45,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
   const shiftSelectStart = useRef<{ x: number; y: number } | null>(null);
   const lastKnownRange = useRef<Range | null>(null);
 
-  const [selectedModel, setSelectedModel] = useState('gpt-4o-mini');
+  const [selectedModel, setSelectedModel] = useState('gpt-5-mini');
   const [isTitleGenerating, setIsTitleGenerating] = useState(false);
   const titleGeneratedRef = useRef<Set<string>>(new Set());
   const VIEWED_SOURCES_HEADER_SELECTOR = '[data-viewed-sources-header="true"]';
@@ -91,44 +92,32 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       container.removeAttribute('data-ai-output-animating');
     };
 
+    const ensureToggleOutsideBody = () => {
+      const toggle = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
+      if (toggle && toggle.parentElement !== container) {
+        const spacers = Array.from(container.querySelectorAll('[data-ai-output-spacer="true"]')) as HTMLElement[];
+        const insertBeforeNode = spacers.length > 1 ? spacers[1] : body;
+        container.insertBefore(toggle, insertBeforeNode);
+      }
+    };
+
     // Helper: apply all toggle / header / spacer / label UI changes
     const applyUiChanges = () => {
       const toggle = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
       const spacer = container.querySelector('[data-ai-output-spacer="true"]') as HTMLElement | null;
       const header = body.querySelector(VIEWED_SOURCES_HEADER_SELECTOR) as HTMLElement | null;
-      const sourcesContainer = header?.parentElement ?? null;
-      const hasReplacementToggle = container.getAttribute('data-ai-toggle-replaces-sources') === 'true';
 
       if (collapsed) {
-        if (header) {
-          container.setAttribute('data-ai-toggle-replaces-sources', 'true');
-        }
-        if (header) {
-          header.style.display = 'none';
-        }
-        if (toggle && sourcesContainer) {
-          sourcesContainer.parentElement?.insertBefore(toggle, sourcesContainer);
-          toggle.style.display = 'inline-flex';
-        } else if (toggle) {
-          toggle.style.display = 'inline-flex';
-        }
+        if (header) header.style.display = 'none';
+        if (toggle) toggle.style.display = 'inline-flex';
         if (spacer) spacer.style.display = 'none';
       } else {
-        if (hasReplacementToggle) {
-          if (header) header.style.display = 'inline-flex';
-          if (toggle) toggle.style.display = 'inline-flex';
-          if (spacer) spacer.style.display = 'none';
-        } else {
-          if (header) {
-            header.style.display = 'inline-flex';
-          }
-          if (toggle) {
-            container.insertBefore(toggle, container.firstChild);
-            toggle.style.display = 'none';
-          }
-        }
-        if (!hasReplacementToggle && spacer) spacer.style.display = '';
+        if (header) header.style.display = 'inline-flex';
+        if (toggle) toggle.style.display = 'inline-flex';
+        if (spacer) spacer.style.display = '';
       }
+
+      ensureToggleOutsideBody();
 
       const label = container.querySelector('[data-ai-output-label="true"]') as HTMLElement | null;
       if (label) {
@@ -150,6 +139,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     if (animate) {
       if (collapsed) {
         // HIDE: animate body collapse first, then apply DOM changes + hidden state
+        ensureToggleOutsideBody();
         animateAiHide(body, () => {
           applyUiChanges();
           finishAnimation();
@@ -158,6 +148,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         // SHOW: clear hidden state + apply UI changes first so we can measure,
         // then animate the body expanding from 0
         clearAiHiddenState(body);
+        ensureToggleOutsideBody();
         applyUiChanges();
         animateAiShow(body, finishAnimation);
       }
@@ -364,7 +355,8 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         setAiOutputCollapsed(output, true);
       }
     });
-  }, [setAiOutputCollapsed]);
+    persistViewedSourcesForOutput(doc.id, outputContainer);
+  }, [doc.id, persistViewedSourcesForOutput, setAiOutputCollapsed]);
 
   const { handleAiReview, cancelReview, isLoading, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(
     editorRef,
@@ -483,6 +475,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
   // Load saved content on mount
   useEffect(() => {
+    document.execCommand('defaultParagraphSeparator', false, 'p');
     if (!editorRef.current) return;
     if (!doc.content || isPlaceholderHtml(doc.content)) return;
 
@@ -496,6 +489,9 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       hydrateSearchResultImages(editorRef.current);
       normalizeContent();
       rehydrateViewedSourcesToggles(editorRef.current);
+      rehydrateSourceLinks(editorRef.current);
+      rehydrateInteractiveSources(editorRef.current);
+      persistViewedSourcesForDoc(doc.id, editorRef.current);
 
       editorRef.current.querySelectorAll<HTMLElement>('[data-ai-output-toggle="true"]').forEach((toggle) => {
         toggle.dataset.aiUi = 'true';
@@ -551,9 +547,25 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         }
       });
 
+      editorRef.current.querySelectorAll<HTMLElement>('[data-human-text="true"]').forEach((el) => {
+        const block = el.closest('p, div, li, h1, h2, h3, h4, h5, h6, blockquote') as HTMLElement | null;
+        if (block) block.setAttribute('data-human-block', 'true');
+      });
+
       rehydrateAiOutputs();
     });
-  }, [doc.content, hydrateSearchResultImages, isPlaceholderHtml, normalizeContent, rehydrateAiOutputs, rehydrateViewedSourcesToggles]);
+  }, [
+    doc.content,
+    doc.id,
+    hydrateSearchResultImages,
+    isPlaceholderHtml,
+    normalizeContent,
+    rehydrateAiOutputs,
+    rehydrateViewedSourcesToggles,
+    rehydrateSourceLinks,
+    rehydrateInteractiveSources,
+    persistViewedSourcesForDoc,
+  ]);
 
 
   useEffect(() => {
@@ -667,6 +679,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     const content = isPlaceholder ? '' : rawContent;
     const title = !textContent || isPlaceholder ? 'Untitled' : doc.title || 'Untitled';
 
+    persistViewedSourcesForDoc(doc.id, editorRef.current);
     onSave(doc.id, content, title);
 
     if (!isPlaceholder && textContent && doc.title === 'Untitled') {
@@ -1043,6 +1056,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
                 if (cp.getAttribute('data-ai-highlighted') === 'true') return;
                 const span = document.createElement('span');
                 span.setAttribute('data-ai-highlighted', 'true');
+                span.setAttribute('data-ai-highlighted-at', String(Date.now()));
 
                 const style = window.getComputedStyle(cp);
                 span.style.fontFamily = style.fontFamily;
@@ -1213,7 +1227,31 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
   const insertStyledText = (text: string) => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || !editorRef.current) return;
-    const range = selection.getRangeAt(0);
+    let range = selection.getRangeAt(0);
+
+    const tagHumanBlock = (node: Node | null) => {
+      const el = node?.nodeType === Node.ELEMENT_NODE
+        ? node as HTMLElement
+        : node?.parentElement;
+      const block = el?.closest('p, div, li, h1, h2, h3, h4, h5, h6, blockquote') as HTMLElement | null;
+      if (block) block.setAttribute('data-human-block', 'true');
+    };
+
+    const ensureParagraphContainer = () => {
+      const block = getClosestBlock(range.startContainer);
+      if (!block || block === editorRef.current) {
+        const p = document.createElement('p');
+        p.style.lineHeight = '1.5';
+        p.setAttribute('data-human-block', 'true');
+        p.appendChild(document.createElement('br'));
+        range.insertNode(p);
+        const newRange = document.createRange();
+        newRange.setStart(p, 0);
+        newRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+      }
+    };
 
 
 
@@ -1241,6 +1279,10 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     }
 
     if (!range.collapsed) range.deleteContents();
+
+    ensureParagraphContainer();
+
+    range = selection.getRangeAt(0);
 
     const collapsedOutput = getCollapsedAiOutputContainer(range.startContainer);
     const highlightSpan = collapsedOutput ? getHighlightSpan(range) : null;
@@ -1271,6 +1313,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
           range.collapse(true);
           selection.removeAllRanges();
           selection.addRange(range);
+          tagHumanBlock(humanSpan);
           return;
         }
       }
@@ -1283,10 +1326,12 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       if (parent && (parent.tagName === 'SPAN' && isHumanTextSpan(parent))) {
         const offset = range.startOffset;
         textNode.insertData(offset, text);
+        parent.setAttribute('data-human-updated-at', String(Date.now()));
         range.setStart(textNode, offset + text.length);
         range.collapse(true);
         selection.removeAllRanges();
         selection.addRange(range);
+        tagHumanBlock(parent);
         return;
       }
     }
@@ -1299,10 +1344,12 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         if (textNode && textNode.nodeType === Node.TEXT_NODE) {
           const offset = range.startOffset;
           textNode.insertData(offset, text);
+          element.setAttribute('data-human-updated-at', String(Date.now()));
           range.setStart(textNode, offset + text.length);
           range.collapse(true);
           selection.removeAllRanges();
           selection.addRange(range);
+          tagHumanBlock(element);
           return;
         }
       }
@@ -1315,6 +1362,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
+    tagHumanBlock(span);
   };
 
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -1385,6 +1433,16 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
             setAiOutputCollapsed(collapsedOutput, false);
             return;
           }
+        }
+        const block = getClosestBlock(range.startContainer);
+        if (block && block.tagName !== 'LI') {
+          e.preventDefault();
+          e.stopPropagation();
+          document.execCommand('insertParagraph');
+          const newRange = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+          const newBlock = newRange ? getClosestBlock(newRange.startContainer) : null;
+          if (newBlock) newBlock.setAttribute('data-human-block', 'true');
+          return;
         }
       }
     }
@@ -1753,6 +1811,10 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
       <style dangerouslySetInnerHTML={{
         __html: `
+          [data-human-block="true"] {
+            margin: 0 0 0.75rem 0 !important;
+          }
+
           [data-ai-hidden="true"] {
             display: none;
           }
@@ -1774,7 +1836,47 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
           [data-ai-show-highlight="true"] [data-ai-highlighted="true"] {
             visibility: visible;
+            display: inline-block;
+            max-width: 100%;
+          }
+
+          [data-ai-show-highlight="true"] [data-ai-highlighted="true"]::after {
+            content: '';
+            display: block;
+            height: 0.75rem;
+          }
+
+          [data-ai-show-highlight="true"] [data-human-text="true"] {
+            visibility: visible;
             display: inline;
+          }
+
+          [data-ai-output="true"][data-ai-output-collapsed="true"] [data-ai-output-body="true"] [data-ai-highlighted="true"] {
+            display: inline-block;
+            max-width: 100%;
+          }
+
+          [data-ai-output="true"][data-ai-output-collapsed="true"] [data-ai-output-body="true"] [data-ai-highlighted="true"]::after {
+            content: '';
+            display: block;
+            height: 0.75rem;
+          }
+
+          [data-ai-output="true"][data-ai-output-collapsed="true"] [data-ai-output-body="true"] [data-human-text="true"] {
+            display: inline;
+          }
+
+          [data-ai-output="true"][data-ai-output-collapsed="true"] [data-ai-output-body="true"] p {
+            margin: 0 0 0.75rem 0;
+          }
+
+          [data-ai-output="true"][data-ai-output-collapsed="true"] [data-ai-output-body="true"] p[data-ai-output-toggle="true"],
+          [data-ai-output="true"][data-ai-output-collapsed="true"] [data-ai-output-body="true"] p[data-ai-output-spacer="true"] {
+            margin: 0;
+          }
+
+          [data-ai-output="true"][data-ai-output-collapsed="true"] [data-ai-output-body="true"] p[data-ai-contains-highlight="true"] {
+            display: block;
           }
 
           [data-ai-highlight-clone="true"] {

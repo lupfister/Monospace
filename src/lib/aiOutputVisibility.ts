@@ -313,3 +313,191 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
     });
   }, dur + 20);
 };
+
+type DisclosureMetrics = {
+  display: string;
+  marginTop: string;
+  marginBottom: string;
+  paddingTop: string;
+  paddingBottom: string;
+};
+
+const getDisclosureMetrics = (el: HTMLElement): DisclosureMetrics => {
+  const style = getComputedStyle(el);
+  const display = style.display === 'none' ? 'block' : style.display;
+  return {
+    display,
+    marginTop: style.marginTop,
+    marginBottom: style.marginBottom,
+    paddingTop: style.paddingTop,
+    paddingBottom: style.paddingBottom,
+  };
+};
+
+const storeDisclosureMetrics = (el: HTMLElement, metrics: DisclosureMetrics) => {
+  el.dataset.disclosureDisplay = metrics.display;
+  el.dataset.disclosureMt = metrics.marginTop;
+  el.dataset.disclosureMb = metrics.marginBottom;
+  el.dataset.disclosurePt = metrics.paddingTop;
+  el.dataset.disclosurePb = metrics.paddingBottom;
+};
+
+const readDisclosureMetrics = (el: HTMLElement): DisclosureMetrics => {
+  const style = getComputedStyle(el);
+  return {
+    display: el.dataset.disclosureDisplay || (style.display === 'none' ? 'block' : style.display),
+    marginTop: el.dataset.disclosureMt || style.marginTop,
+    marginBottom: el.dataset.disclosureMb || style.marginBottom,
+    paddingTop: el.dataset.disclosurePt || style.paddingTop,
+    paddingBottom: el.dataset.disclosurePb || style.paddingBottom,
+  };
+};
+
+const stopDisclosureAnimation = (el: HTMLElement) => {
+  const animEl = el as HTMLElement & { _disclosureTimeout?: number; _disclosureRaf?: number };
+  if (animEl._disclosureTimeout) {
+    window.clearTimeout(animEl._disclosureTimeout);
+    delete animEl._disclosureTimeout;
+  }
+  if (animEl._disclosureRaf) {
+    cancelAnimationFrame(animEl._disclosureRaf);
+    delete animEl._disclosureRaf;
+  }
+  el.style.removeProperty('transition');
+};
+
+/**
+ * Animate collapsing a disclosure-style element (height + blur + squash).
+ * Uses the same motion values as the AI show/hide animation.
+ */
+export const animateDisclosureHide = (el: HTMLElement, onComplete?: () => void) => {
+  stopDisclosureAnimation(el);
+
+  const metrics = getDisclosureMetrics(el);
+  storeDisclosureMetrics(el, metrics);
+
+  const startHeight = el.offsetHeight;
+  if (startHeight === 0) {
+    el.style.display = 'none';
+    onComplete?.();
+    return;
+  }
+
+  el.dataset.disclosureAnimating = 'true';
+  el.style.height = `${startHeight}px`;
+  el.style.overflow = 'hidden';
+  el.style.willChange = 'height, opacity, filter, transform, margin-top, margin-bottom, padding-top, padding-bottom';
+  el.style.transformOrigin = 'top';
+  el.style.opacity = '1';
+  el.style.filter = 'blur(0px)';
+  el.style.transform = 'scaleY(1)';
+  el.style.marginTop = metrics.marginTop;
+  el.style.marginBottom = metrics.marginBottom;
+  el.style.paddingTop = metrics.paddingTop;
+  el.style.paddingBottom = metrics.paddingBottom;
+
+  void el.offsetHeight; // commit starting values
+
+  const dur = AI_HIDE_DURATION;
+  const ease = 'cubic-bezier(0.4, 0, 0.2, 1)';
+
+  (el as HTMLElement & { _disclosureRaf?: number })._disclosureRaf = requestAnimationFrame(() => {
+    el.style.transition = [
+      `height ${dur}ms ${ease}`,
+      `opacity ${dur}ms ${ease}`,
+      `filter ${dur}ms ${ease}`,
+      `transform ${dur}ms ${ease}`,
+      `margin-top ${dur}ms ${ease}`,
+      `margin-bottom ${dur}ms ${ease}`,
+      `padding-top ${dur}ms ${ease}`,
+      `padding-bottom ${dur}ms ${ease}`,
+    ].join(', ');
+    el.style.height = '0px';
+    el.style.opacity = '0';
+    el.style.filter = `blur(${BODY_BLUR}px)`;
+    el.style.transform = `scaleY(${BODY_SQUASH_SCALE})`;
+    el.style.marginTop = '0px';
+    el.style.marginBottom = '0px';
+    el.style.paddingTop = '0px';
+    el.style.paddingBottom = '0px';
+  });
+
+  (el as HTMLElement & { _disclosureTimeout?: number })._disclosureTimeout = window.setTimeout(() => {
+    el.style.display = 'none';
+    el.removeAttribute('data-disclosure-animating');
+    clearAnimStyles(el);
+    onComplete?.();
+  }, dur + 20);
+};
+
+/**
+ * Animate expanding a disclosure-style element (height + blur + squash).
+ * Uses the same motion values as the AI show/hide animation.
+ */
+export const animateDisclosureShow = (el: HTMLElement, onComplete?: () => void) => {
+  stopDisclosureAnimation(el);
+
+  const metrics = readDisclosureMetrics(el);
+  const targetDisplay = metrics.display === 'none' ? 'block' : metrics.display;
+  el.style.display = targetDisplay;
+  el.style.height = 'auto';
+  el.style.overflow = 'visible';
+  el.style.marginTop = metrics.marginTop;
+  el.style.marginBottom = metrics.marginBottom;
+  el.style.paddingTop = metrics.paddingTop;
+  el.style.paddingBottom = metrics.paddingBottom;
+  el.style.opacity = '1';
+  el.style.filter = 'blur(0px)';
+  el.style.transform = 'scaleY(1)';
+
+  const targetHeight = el.offsetHeight;
+  if (targetHeight === 0) {
+    onComplete?.();
+    return;
+  }
+
+  el.dataset.disclosureAnimating = 'true';
+  el.style.height = '0px';
+  el.style.overflow = 'hidden';
+  el.style.marginTop = '0px';
+  el.style.marginBottom = '0px';
+  el.style.paddingTop = '0px';
+  el.style.paddingBottom = '0px';
+  el.style.opacity = '0';
+  el.style.filter = `blur(${BODY_BLUR}px)`;
+  el.style.transform = `scaleY(${BODY_SQUASH_SCALE})`;
+
+  void el.offsetHeight; // commit starting values
+
+  const dur = AI_HIDE_DURATION;
+  const ease = 'cubic-bezier(0.4, 0, 0.2, 1)';
+
+  (el as HTMLElement & { _disclosureRaf?: number })._disclosureRaf = requestAnimationFrame(() => {
+    el.style.transition = [
+      `height ${dur}ms ${ease}`,
+      `opacity ${dur}ms ${ease}`,
+      `filter ${dur}ms ${ease}`,
+      `transform ${dur}ms ${ease}`,
+      `margin-top ${dur}ms ${ease}`,
+      `margin-bottom ${dur}ms ${ease}`,
+      `padding-top ${dur}ms ${ease}`,
+      `padding-bottom ${dur}ms ${ease}`,
+    ].join(', ');
+    el.style.height = `${targetHeight}px`;
+    el.style.opacity = '1';
+    el.style.filter = 'blur(0px)';
+    el.style.transform = 'scaleY(1)';
+    el.style.marginTop = metrics.marginTop;
+    el.style.marginBottom = metrics.marginBottom;
+    el.style.paddingTop = metrics.paddingTop;
+    el.style.paddingBottom = metrics.paddingBottom;
+  });
+
+  (el as HTMLElement & { _disclosureTimeout?: number })._disclosureTimeout = window.setTimeout(() => {
+    el.style.display = targetDisplay;
+    el.style.overflow = 'visible';
+    el.removeAttribute('data-disclosure-animating');
+    clearAnimStyles(el);
+    onComplete?.();
+  }, dur + 20);
+};

@@ -4,6 +4,8 @@ import { createAiTextBlock } from './domUtils';
 import { createAiTextWithLinksFragment, createAiTextSpan, createStyledSourceLink } from './textStyles';
 import { formatAiOutputLabel } from './aiOutputLabel';
 import { SkeletonNotes, SkeletonNoteBlock, AiError, exploreSource } from './openaiAgentApi';
+import { ensureAiOutputId } from './aiOutputSources';
+import { animateDisclosureHide, animateDisclosureShow } from './aiOutputVisibility';
 
 
 /**
@@ -212,6 +214,8 @@ const VIEWED_SOURCES_ICON_LINE_ATTR = 'data-viewed-sources-line';
 const VIEWED_SOURCES_MORPH_SAMPLES = 36;
 const VIEWED_SOURCES_ANIMATION_DURATION = 220;
 type ViewedSourcesIconState = 'magnifier' | 'line';
+const attachedViewedSourcesIcons = new WeakSet<HTMLElement>();
+const attachedViewedSourcesHeaders = new WeakSet<HTMLElement>();
 
 const samplePathPoints = (pathEl: SVGPathElement, samples: number) => {
     const total = pathEl.getTotalLength();
@@ -364,7 +368,15 @@ const attachViewedSourcesToggle = (
     let isOpen = getInitialViewedSourcesState(list, fallbackState);
     const updateState = (open: boolean, animate = true) => {
         isOpen = open;
-        list.style.display = open ? 'block' : 'none';
+        if (animate) {
+            if (open) {
+                animateDisclosureShow(list);
+            } else {
+                animateDisclosureHide(list);
+            }
+        } else {
+            list.style.display = open ? 'block' : 'none';
+        }
         list.dataset.viewedSourcesOpen = open ? 'true' : 'false';
         icon.dataset.viewedSourcesOpen = open ? 'true' : 'false';
         if (animate) {
@@ -374,7 +386,7 @@ const attachViewedSourcesToggle = (
         }
     };
 
-    if (icon.dataset.viewedSourcesAttached !== 'true') {
+    if (!attachedViewedSourcesIcons.has(icon)) {
         icon.tabIndex = 0;
         icon.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' || event.key === ' ') {
@@ -386,14 +398,14 @@ const attachViewedSourcesToggle = (
             event.stopPropagation();
             updateState(!isOpen);
         });
-        icon.dataset.viewedSourcesAttached = 'true';
+        attachedViewedSourcesIcons.add(icon);
     }
-    if (header && header.dataset.viewedSourcesAttached !== 'true') {
+    if (header && !attachedViewedSourcesHeaders.has(header)) {
         header.addEventListener('click', (event) => {
             event.stopPropagation();
             updateState(!isOpen);
         });
-        header.dataset.viewedSourcesAttached = 'true';
+        attachedViewedSourcesHeaders.add(header);
     }
     updateState(isOpen, false);
 };
@@ -440,16 +452,117 @@ export const rehydrateViewedSourcesToggles = (root: HTMLElement | null) => {
     fallbackHeaders.forEach(processHeader);
 };
 
+const attachedLearnMoreButtons = new WeakSet<HTMLElement>();
+
+const attachLearnMoreHandlers = (
+    learnMoreBtn: HTMLElement,
+    summaryContainer: HTMLElement,
+    url: string,
+    initialContext: string = ''
+) => {
+    if (attachedLearnMoreButtons.has(learnMoreBtn)) return;
+
+    learnMoreBtn.onmouseenter = () => {
+        if (!learnMoreBtn.dataset.loading) learnMoreBtn.style.color = '#4b5563';
+    };
+    learnMoreBtn.onmouseleave = () => {
+        if (!learnMoreBtn.dataset.loading) learnMoreBtn.style.color = '#9ca3af';
+    };
+
+    learnMoreBtn.onclick = async (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+
+        if (learnMoreBtn.dataset.loading === 'true') return;
+
+        learnMoreBtn.dataset.loading = 'true';
+        learnMoreBtn.textContent = 'Learning...';
+        learnMoreBtn.style.cursor = 'wait';
+
+        summaryContainer.style.display = 'block';
+
+        const prevError = summaryContainer.querySelector('.ai-error-inline');
+        if (prevError) prevError.remove();
+
+        const shimmer = createLoadingShimmer('searching');
+        shimmer.style.margin = '0';
+        shimmer.style.padding = '0 0 8px 0';
+        summaryContainer.appendChild(shimmer);
+
+        try {
+            const currentSummary = summaryContainer.innerText.trim();
+            const fullContext = [initialContext, currentSummary].filter(Boolean).join(' ');
+
+            const result = await exploreSource(url, null, fullContext);
+
+            const lastChild = summaryContainer.lastChild;
+            if (lastChild && (lastChild as HTMLElement).className === 'ai-error-inline') {
+                lastChild.remove();
+            }
+            if (shimmer && shimmer.parentNode) {
+                shimmer.remove();
+            }
+
+            if (result.ok && result.text) {
+                const p = document.createElement('p');
+
+                const cleanText = result.text
+                    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+                    .replace(/https?:\/\/[^\s]+/g, '');
+
+                summaryContainer.appendChild(createSpacer());
+                p.appendChild(createAiTextSpan(cleanText));
+                summaryContainer.appendChild(p);
+
+                learnMoreBtn.dataset.loading = 'false';
+                learnMoreBtn.textContent = 'Learn more';
+                learnMoreBtn.style.cursor = 'pointer';
+            } else {
+                const errDiv = document.createElement('div');
+                errDiv.className = 'ai-error-inline';
+                errDiv.style.color = '#ef4444';
+                errDiv.style.fontSize = '12px';
+                errDiv.textContent = result.error || 'Could not load info.';
+                summaryContainer.appendChild(errDiv);
+
+                learnMoreBtn.textContent = 'Retry';
+                learnMoreBtn.dataset.loading = 'false';
+                learnMoreBtn.style.cursor = 'pointer';
+            }
+        } catch (err) {
+            if (shimmer && shimmer.parentNode) {
+                shimmer.remove();
+            }
+            const errDiv = document.createElement('div');
+            errDiv.className = 'ai-error-inline';
+            errDiv.style.color = '#ef4444';
+            errDiv.style.fontSize = '12px';
+            errDiv.textContent = 'Error loading info.';
+            summaryContainer.appendChild(errDiv);
+
+            learnMoreBtn.textContent = 'Retry';
+            learnMoreBtn.dataset.loading = 'false';
+            learnMoreBtn.style.cursor = 'pointer';
+        }
+    };
+
+    attachedLearnMoreButtons.add(learnMoreBtn);
+};
+
 /**
  * Creates an interactive source item with a "Learn more" button integrated within the link.
  */
 const createInteractiveSourceItem = (url: string, label: string, initialContext: string = ''): HTMLDivElement => {
     const container = document.createElement('div');
+    container.dataset.sourceItem = 'true';
+    container.dataset.sourceUrl = url;
+    container.dataset.sourceContext = initialContext;
     container.style.margin = '0';
     // container.style.marginBottom = '8px'; // Removed spacer gap
 
     // Container for AI summary (inserted above link)
     const summaryContainer = document.createElement('div');
+    summaryContainer.dataset.sourceSummary = 'true';
     summaryContainer.style.display = 'none';
     // summaryContainer.style.marginBottom = '6px'; // Removed spacer gap
     // Use standard AI text styling (Inter, gray)
@@ -473,107 +586,27 @@ const createInteractiveSourceItem = (url: string, label: string, initialContext:
     learnMoreBtn.style.borderLeft = '1px solid #e5e7eb';
     learnMoreBtn.style.whiteSpace = 'nowrap';
     learnMoreBtn.style.transition = 'color 0.2s';
-
-    // Hover effect for the button
-    learnMoreBtn.onmouseenter = () => {
-        if (!learnMoreBtn.dataset.loading) learnMoreBtn.style.color = '#4b5563';
-    };
-    learnMoreBtn.onmouseleave = () => {
-        if (!learnMoreBtn.dataset.loading) learnMoreBtn.style.color = '#9ca3af';
-    };
-
-    learnMoreBtn.onclick = async (e) => {
-        e.stopPropagation(); // Prevent opening the link
-        e.preventDefault();
-
-        // Prevent multiple clicks
-        if (learnMoreBtn.dataset.loading === 'true') return;
-
-        // Visual state: Loading
-        learnMoreBtn.dataset.loading = 'true';
-        learnMoreBtn.textContent = 'Learning...';
-        learnMoreBtn.style.cursor = 'wait';
-
-        // Show shimmer in summary container
-        summaryContainer.style.display = 'block';
-
-        // Remove any previous error message before adding shimmer
-        const prevError = summaryContainer.querySelector('.ai-error-inline');
-        if (prevError) prevError.remove();
-
-        const shimmer = createLoadingShimmer('searching');
-        shimmer.style.margin = '0';
-        shimmer.style.padding = '0 0 8px 0';
-        summaryContainer.appendChild(shimmer);
-
-        try {
-            // Collect existing text to pass as context
-            // Combine initial context (quote) and any already generated summary text
-            const currentSummary = summaryContainer.innerText.trim();
-            const fullContext = [initialContext, currentSummary].filter(Boolean).join(' '); // Join with space
-
-            const result = await exploreSource(url, null, fullContext);
-
-            // Remove previous error/shimmer before adding new result
-            const lastChild = summaryContainer.lastChild;
-            if (lastChild && (lastChild as HTMLElement).className === 'ai-error-inline') {
-                lastChild.remove();
-            }
-            shimmer.remove();
-
-            if (result.ok && result.text) {
-                // Success: Append a new paragraph with the result text
-                const p = document.createElement('p');
-
-                // Final safety cleanup of any stray markdown links or raw URLs
-                const cleanText = result.text
-                    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-                    .replace(/https?:\/\/[^\s]+/g, '');
-
-                // User requested empty line above appended text. 
-                // Always add a gap above relative to preceding content.
-                summaryContainer.appendChild(createSpacer());
-
-                p.appendChild(createAiTextSpan(cleanText));
-                summaryContainer.appendChild(p);
-
-                // Ensure button resets but stays visible
-                learnMoreBtn.dataset.loading = 'false';
-                learnMoreBtn.textContent = 'Learn more';
-                learnMoreBtn.style.cursor = 'pointer';
-            } else {
-                // Error (stay in summary container but use an inline error style)
-                const errDiv = document.createElement('div');
-                errDiv.className = 'ai-error-inline';
-                errDiv.style.color = '#ef4444';
-                errDiv.style.fontSize = '12px';
-                errDiv.textContent = result.error || 'Could not load info.';
-                summaryContainer.appendChild(errDiv);
-
-                // Reset button
-                learnMoreBtn.textContent = 'Retry';
-                learnMoreBtn.dataset.loading = 'false';
-                learnMoreBtn.style.cursor = 'pointer';
-            }
-        } catch (err) {
-            shimmer.remove();
-            const errDiv = document.createElement('div');
-            errDiv.className = 'ai-error-inline';
-            errDiv.style.color = '#ef4444';
-            errDiv.style.fontSize = '12px';
-            errDiv.textContent = 'Error loading info.';
-            summaryContainer.appendChild(errDiv);
-
-            learnMoreBtn.textContent = 'Retry';
-            learnMoreBtn.dataset.loading = 'false';
-            learnMoreBtn.style.cursor = 'pointer';
-        }
-    };
+    learnMoreBtn.dataset.sourceLearnMore = 'true';
+    attachLearnMoreHandlers(learnMoreBtn, summaryContainer, url, initialContext);
 
     linkComponent.appendChild(learnMoreBtn);
     container.appendChild(linkComponent);
 
     return container;
+};
+
+export const rehydrateInteractiveSources = (root: HTMLElement | null): void => {
+    if (!root) return;
+    const containers = Array.from(root.querySelectorAll<HTMLElement>('[data-source-item="true"]'));
+    containers.forEach((container) => {
+        const url = container.dataset.sourceUrl;
+        if (!url) return;
+        const summary = container.querySelector<HTMLElement>('[data-source-summary="true"]');
+        const learnMore = container.querySelector<HTMLElement>('[data-source-learn-more="true"]');
+        if (!summary || !learnMore) return;
+        const initialContext = container.dataset.sourceContext || '';
+        attachLearnMoreHandlers(learnMore, summary, url, initialContext);
+    });
 };
 
 
@@ -725,7 +758,15 @@ const createSpacer = () => {
     el.dataset.aiOutputSpacer = 'true';
     el.style.lineHeight = '1.5';
     el.style.minHeight = '1.5em';
-    el.style.margin = '0';
+    el.appendChild(document.createElement('br'));
+    return el;
+};
+
+const createParagraphSpace = () => {
+    const el = document.createElement('p');
+    el.dataset.aiText = 'true';
+    el.dataset.aiOrigin = 'true';
+    el.style.lineHeight = '1.5';
     el.appendChild(document.createElement('br'));
     return el;
 };
@@ -738,6 +779,7 @@ export const buildSearchResultsBlock = async (
     outputContainer.dataset.aiOutput = 'true';
     outputContainer.dataset.aiOutputCollapsed = 'false';
     outputContainer.dataset.aiOutputGeneratedAt = new Date().toISOString();
+    ensureAiOutputId(outputContainer);
 
     outputContainer.appendChild(createAiOutputSpacer());
     const toggle = createAiOutputToggle(outputContainer.dataset.aiOutputGeneratedAt);
@@ -983,8 +1025,8 @@ export const buildSearchResultsBlock = async (
                 fragment.appendChild(promptP);
 
                 // User lines - Always 2 gaps
-                fragment.appendChild(createSpacer());
-                fragment.appendChild(createSpacer());
+                fragment.appendChild(createParagraphSpace());
+                fragment.appendChild(createParagraphSpace());
             }
         });
     }

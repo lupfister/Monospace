@@ -64,6 +64,8 @@ export interface FullReviewResult {
 export interface ContextBlock {
   source: 'human' | 'ai';
   text: string;
+  updatedAt?: number;
+  highlighted?: boolean;
 }
 
 type InternalAiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search' | 'explore_source' | 'title';
@@ -382,12 +384,14 @@ function getSuggestionForError(type: string): string | undefined {
 }
 
 /**
- * OpenAI model IDs that support the Agents API and hosted web search
- * (GPT-4o and GPT-4.1 series). Ordered by price ascending (cheapest first).
- * Rough per-1M tokens: 4o-mini $0.15/$0.60, 4.1-mini $0.80/$3.20, 4.1 $2/$8.
+ * OpenAI model IDs that work with the Agents API + hosted web search.
+ * GPT-5 series only.
  */
 export const OPENAI_MODEL_OPTIONS: readonly string[] = [
-  'gpt-4o-mini',
-  'gpt-4.1-mini',
-  'gpt-4.1',
+  'gpt-5.2-pro',
+  'gpt-5.2',
+  'gpt-5.1',
+  'gpt-5',
+  'gpt-5-mini',
+  'gpt-5-nano',
 ];

@@ -27,12 +27,15 @@ const SEARCH_PLAN_SCHEMA = z.object({
     .max(10),
 });
 
-const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-5-mini';
 
 export const AI_MODELS = [
-  { id: 'gpt-4o-mini', label: 'Default', description: 'Cheapest, full support' },
-  { id: 'gpt-4.1-mini', label: 'Balanced', description: 'Mid-tier' },
-  { id: 'gpt-4.1', label: 'Strongest', description: 'Best quality' },
+  { id: 'gpt-5-nano', label: 'Nano', description: 'Lowest cost' },
+  { id: 'gpt-5-mini', label: 'Mini', description: 'Cost-efficient' },
+  { id: 'gpt-5', label: 'GPT-5', description: 'Balanced' },
+  { id: 'gpt-5.1', label: 'GPT-5.1', description: 'Faster GPT-5' },
+  { id: 'gpt-5.2', label: 'GPT-5.2', description: 'Latest GPT-5' },
+  { id: 'gpt-5.2-pro', label: 'GPT-5.2 Pro', description: 'Highest quality' },
 ] as const;
 
 const getModel = (model?: string | null): string => {
@@ -40,7 +43,7 @@ const getModel = (model?: string | null): string => {
   return DEFAULT_MODEL;
 };
 
-/** gpt-4.1-nano does not support web_search_preview; use mini for search when nano is requested. */
+/** gpt-4.1-nano does not support web_search; use mini for search when nano is requested. */
 const getModelForSearch = (modelOverride?: string | null): string => {
   const requested = getModel(modelOverride);
   if (requested === 'gpt-4.1-nano') return 'gpt-4.1-mini';
@@ -127,17 +130,135 @@ export const handleExpand = async (text: string, model?: string | null): Promise
 export interface ContextBlock {
   source: 'human' | 'ai';
   text: string;
+  updatedAt?: number;
+  highlighted?: boolean;
 }
 
-const formatContext = (context: ContextBlock[]): string => {
-  return context.map(block => `[${block.source.toUpperCase()}]: ${block.text}`).join('\n\n');
+const CONTEXT_WEIGHTING = {
+  humanBase: 1.25,
+  aiBase: 0.8,
+  highlightedBoost: 1.6,
+  recencyHalfLifeMinutes: 60 * 24 * 3, // 3 days
+  recencyBoostMax: 0.9,
+  priorityBlockLimit: 10,
+  priorityCharLimit: 3200,
+  fullContextCharLimit: 14000,
+  fullContextHeadRatio: 0.25,
+} as const;
+
+const normalizeTimestamp = (raw?: number | string | null): number | undefined => {
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const num = Number(raw);
+    if (!Number.isNaN(num) && num > 0) return num;
+    const parsed = Date.parse(raw);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return undefined;
+};
+
+const scoreContextBlock = (block: ContextBlock, nowMs: number): number => {
+  const base = block.source === 'human' ? CONTEXT_WEIGHTING.humanBase : CONTEXT_WEIGHTING.aiBase;
+  const highlightBoost = block.highlighted ? CONTEXT_WEIGHTING.highlightedBoost : 1;
+  const updatedAt = normalizeTimestamp(block.updatedAt);
+  const halfLifeMs = CONTEXT_WEIGHTING.recencyHalfLifeMinutes * 60 * 1000;
+  let recencyBoost = 0;
+  if (updatedAt && updatedAt <= nowMs) {
+    const ageMs = nowMs - updatedAt;
+    recencyBoost = Math.exp(-ageMs / halfLifeMs);
+  }
+  return base * highlightBoost * (1 + CONTEXT_WEIGHTING.recencyBoostMax * recencyBoost);
+};
+
+const formatContextBlock = (
+  block: ContextBlock,
+  opts: { includeMeta: boolean; score?: number },
+): string => {
+  const labelParts = [block.source.toUpperCase()];
+  if (opts.includeMeta && block.highlighted) labelParts.push('HIGHLIGHTED');
+  if (opts.includeMeta) {
+    const updatedAt = normalizeTimestamp(block.updatedAt);
+    if (updatedAt) labelParts.push(`UPDATED ${new Date(updatedAt).toISOString()}`);
+    if (typeof opts.score === 'number') labelParts.push(`WEIGHT ${opts.score.toFixed(2)}`);
+  }
+  return `[${labelParts.join(' | ')}]: ${block.text}`;
+};
+
+const buildFullContext = (blocks: Array<{ formatted: string }>): string => {
+  const joined = blocks.map(b => b.formatted).join('\n\n');
+  if (joined.length <= CONTEXT_WEIGHTING.fullContextCharLimit) return joined;
+
+  const headBudget = Math.round(CONTEXT_WEIGHTING.fullContextCharLimit * CONTEXT_WEIGHTING.fullContextHeadRatio);
+  const tailBudget = CONTEXT_WEIGHTING.fullContextCharLimit - headBudget - 40;
+
+  let head = '';
+  for (const block of blocks) {
+    const next = head ? `${head}\n\n${block.formatted}` : block.formatted;
+    if (next.length > headBudget) break;
+    head = next;
+  }
+
+  let tail = '';
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const next = tail ? `${blocks[i].formatted}\n\n${tail}` : blocks[i].formatted;
+    if (next.length > tailBudget) break;
+    tail = next;
+  }
+
+  return `${head}\n\n[...truncated for length...]\n\n${tail}`.trim();
+};
+
+const buildWeightedContext = (context: ContextBlock[]) => {
+  const nowMs = Date.now();
+  const scored = context.map((block, index) => {
+    const updatedAt = normalizeTimestamp(block.updatedAt);
+    return {
+      block: { ...block, updatedAt },
+      index,
+      score: scoreContextBlock(block, nowMs),
+    };
+  });
+
+  const prioritySorted = [...scored].sort((a, b) => b.score - a.score);
+  const priorityBlocks: typeof scored = [];
+  let priorityChars = 0;
+  for (const item of prioritySorted) {
+    if (priorityBlocks.length >= CONTEXT_WEIGHTING.priorityBlockLimit) break;
+    const formatted = formatContextBlock(item.block, { includeMeta: true, score: item.score });
+    if (priorityChars + formatted.length > CONTEXT_WEIGHTING.priorityCharLimit && priorityBlocks.length > 0) break;
+    priorityBlocks.push({ ...item, formatted });
+    priorityChars += formatted.length + 2;
+  }
+
+  const priorityContext = priorityBlocks
+    .map(item => item.formatted ?? formatContextBlock(item.block, { includeMeta: true, score: item.score }))
+    .join('\n\n');
+
+  const fullContext = buildFullContext(
+    scored.map(item => ({
+      formatted: formatContextBlock(item.block, { includeMeta: false }),
+    })),
+  );
+
+  return { priorityContext, fullContext };
 };
 
 const getLastHumanText = (context: ContextBlock[]): string => {
-  for (let i = context.length - 1; i >= 0; i--) {
-    if (context[i].source === 'human') return context[i].text;
+  let lastInOrder: ContextBlock | null = null;
+  let latestByTime: { block: ContextBlock; ts: number } | null = null;
+
+  for (const block of context) {
+    if (block.source !== 'human') continue;
+    lastInOrder = block;
+    const ts = normalizeTimestamp(block.updatedAt);
+    if (ts && (!latestByTime || ts > latestByTime.ts)) {
+      latestByTime = { block, ts };
+    }
   }
-  return '';
+
+  if (latestByTime) return latestByTime.block.text;
+  return lastInOrder?.text || '';
 };
 
 export const handleReviewSkeletonNotes = async (
@@ -148,8 +269,11 @@ export const handleReviewSkeletonNotes = async (
 ): Promise<string> => {
   // If we have structure context, use it. Otherwise fall back to raw text.
   // We prioritize the last human message for the "User's text" part, but provide the full history.
-  const conversationHistory = context.length > 0 ? formatContext(context) : `[HUMAN]: ${text}`;
-  const latestUserText = context.length > 0 ? getLastHumanText(context) : text;
+  const hasContext = context.length > 0;
+  const weighted = hasContext ? buildWeightedContext(context) : null;
+  const conversationHistory = hasContext ? weighted!.fullContext : `[HUMAN]: ${text}`;
+  const priorityContext = hasContext ? weighted!.priorityContext : '';
+  const latestUserText = hasContext ? getLastHumanText(context) : text;
 
   const prompt = `You are writing "skeleton notes" for a document editor. The app will display content in this order: (1) Viewed Sources, (2) Text quote excerpts from sources, (3) your questions.
   
@@ -165,9 +289,14 @@ type Output = { blocks: Block[] };
 Output order (strict):
 1. Questions: 1–3 "input" blocks. 
    - Base your questions primarily on the *content* of the search results (which will be displayed as quotes to the user).
-   - If the search results focus on a single clear fact/concept, ask questions about that specific detail.
+   - If you reference a specific source or concept, it MUST appear in the excerpted quotes shown to the user (not just the broader sources list).
+   - If the search results focus on a single clear fact/concept, ask what that detail *means* or changes (implications, mental model, personal take).
    - If the results are diverse or contradictory, ask about the collective implications or the tension between them.
    - Questions should be thought-provoking but directly relevant to the material found.
+   - Avoid quiz/trivia or "test your knowledge" framing. Do not ask for factual recall beyond what the quotes already show.
+   - Questions must be answerable from the user's perspective (opinion, interpretation, implications, or personal experience).
+   - Keep the tone comfortable and accessible; avoid overly technical or "nerdy" phrasing.
+   - It is OK to speculate about likely follow-up curiosity, but keep it grounded and answerable.
    - Use "input" blocks: prompt is shown in gray; then render exactly "lines" empty user lines to fill in (use 2–4 for depth).
 
 Rules:
@@ -189,7 +318,10 @@ ${searchContext ? `Context from web search (incorporate relevant findings into t
 ${searchContext}` : ''
     }
 
-CONVERSATION HISTORY:
+PRIORITY CONTEXT (use this first; weighted toward user-written text, highlighted AI text, and most recent timestamps):
+${priorityContext || 'None'}
+
+FULL CONTEXT (chronological, may be truncated for length):
 ${conversationHistory}
 
 LATEST USER INPUT (Focus your response here):
@@ -211,8 +343,11 @@ export const handlePlanSearch = async (
   // Use same model as search so plan quality matches execution (nano doesn't support web search; plan with mini).
   const modelToUse = getModelForSearch(model);
 
-  const conversationHistory = context.length > 0 ? formatContext(context) : `[HUMAN]: ${text}`;
-  const latestUserText = context.length > 0 ? getLastHumanText(context) : text;
+  const hasContext = context.length > 0;
+  const weighted = hasContext ? buildWeightedContext(context) : null;
+  const conversationHistory = hasContext ? weighted!.fullContext : `[HUMAN]: ${text}`;
+  const priorityContext = hasContext ? weighted!.priorityContext : '';
+  const latestUserText = hasContext ? getLastHumanText(context) : text;
 
   const prompt = `You are an Expert Search Strategist. Your goal is to find content that connects the user's text to unexpected fields, history, or future possibilities. Avoid the obvious.
 
@@ -229,6 +364,9 @@ GOALS BY TYPE:
 
 Text to analyze:
 ${conversationHistory}
+
+Priority context (weighted toward user-written text, highlighted AI text, and most recent timestamps):
+${priorityContext || 'None'}
 
 Focus on the LATEST human input:
 ${latestUserText}`;

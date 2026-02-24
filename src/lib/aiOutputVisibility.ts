@@ -5,6 +5,7 @@ const AI_HIDE_SCALE = 0.7;
 const AI_HIDE_SHIFT_Y = -6; // px
 const BODY_SQUASH_SCALE = 0.88;
 const BODY_BLUR = 4; // px
+const TEXT_BLUR = 4; // px
 
 const removeAttributeFromAll = (root: HTMLElement, selector: string, attr: string) => {
   root.querySelectorAll(selector).forEach((el) => {
@@ -142,6 +143,45 @@ const clearAnimStyles = (el: HTMLElement) => {
   for (const prop of ANIM_PROPS) el.style.removeProperty(prop);
 };
 
+const clearTextAnimStyles = (elements: HTMLElement[]) => {
+  elements.forEach((el) => {
+    el.style.removeProperty('opacity');
+    el.style.removeProperty('filter');
+    el.style.removeProperty('transition');
+    el.style.removeProperty('will-change');
+  });
+};
+
+const prepareTextForHide = (elements: HTMLElement[]) => {
+  elements.forEach((el) => {
+    el.style.willChange = 'opacity, filter';
+    el.style.opacity = '1';
+    el.style.filter = 'blur(0px)';
+  });
+};
+
+const prepareTextForShow = (elements: HTMLElement[]) => {
+  elements.forEach((el) => {
+    el.style.willChange = 'opacity, filter';
+    el.style.opacity = '0';
+    el.style.filter = `blur(${TEXT_BLUR}px)`;
+  });
+};
+
+const runTextTransition = (elements: HTMLElement[], mode: 'in' | 'out', duration: number) => {
+  const ease = 'cubic-bezier(0.4, 0, 0.2, 1)';
+  elements.forEach((el) => {
+    el.style.transition = `opacity ${duration}ms ${ease}, filter ${duration}ms ${ease}`;
+    if (mode === 'out') {
+      el.style.opacity = '0';
+      el.style.filter = `blur(${TEXT_BLUR}px)`;
+    } else {
+      el.style.opacity = '1';
+      el.style.filter = 'blur(0px)';
+    }
+  });
+};
+
 const animateBodyReveal = (body: HTMLElement, duration: number) => {
   body.style.willChange = 'opacity, filter, transform';
   body.style.transformOrigin = 'top';
@@ -163,11 +203,9 @@ const animateBodyReveal = (body: HTMLElement, duration: number) => {
  * Animate hiding AI content.
  *
  * Two coordinated layers run simultaneously:
- *   1. **Body height** transitions from full → target (height with AI
- *      elements removed). This gives external content a single, smooth
- *      upward slide with no per-element jittering.
- *   2. **Per-element fade + blur** on each AI-only child makes the
- *      content itself disappear visually inside the clipped body.
+ *   1. **Body fade/blur/squash** removes the AI block visually without
+ *      shifting layout during the animation.
+ *   2. **Per-element text blur** makes AI text dissolve as it hides.
  *
  * Persistent content (highlighted text, human text, toggle) is untouched.
  */
@@ -192,15 +230,12 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
 
   // ── Measure ──────────────────────────────────────────────────────
   const startHeight = body.offsetHeight;
-  applyAiHiddenState(body);
-  const targetHeight = body.offsetHeight;
-  clearAiHiddenState(body);
 
   // ── Lock starting state ──────────────────────────────────────────
   // Body container — controls external layout
   body.style.height = startHeight + 'px';
   body.style.overflow = 'hidden';
-  body.style.willChange = 'height, transform, opacity, filter';
+  body.style.willChange = 'transform, opacity, filter';
   body.style.transformOrigin = 'top';
   body.style.transform = 'scaleY(1)';
   body.style.opacity = '1';
@@ -211,24 +246,25 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
   // ── Animate ──────────────────────────────────────────────────────
   const dur = AI_HIDE_DURATION;
   const ease = 'cubic-bezier(0.4, 0, 0.2, 1)';
+  prepareTextForHide(toHide);
 
   requestAnimationFrame(() => {
     body.style.transition = [
-      `height ${dur}ms ${ease}`,
       `transform ${dur}ms ${ease}`,
       `opacity ${dur}ms ${ease}`,
       `filter ${dur}ms ${ease}`,
     ].join(', ');
-    body.style.height = targetHeight + 'px';
     body.style.transform = `scaleY(${BODY_SQUASH_SCALE})`;
     body.style.opacity = '0';
     body.style.filter = `blur(${BODY_BLUR}px)`;
+    runTextTransition(toHide, 'out', dur);
   });
 
   // ── Cleanup ──────────────────────────────────────────────────────
   setTimeout(() => {
     applyAiHiddenState(body);
     clearAnimStyles(body);
+    clearTextAnimStyles(toHide);
     body.style.overflow = 'visible';
     animateBodyReveal(body, Math.round(dur * 0.6));
     onComplete?.();
@@ -272,7 +308,6 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
   const startHeight = body.offsetHeight;
   clearAiHiddenState(body);
   const targetHeight = body.offsetHeight;
-  applyAiHiddenState(body);
 
   // ── Lock starting state ──────────────────────────────────────────
   body.style.height = startHeight + 'px';
@@ -305,10 +340,15 @@ export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
   // ── Cleanup ──────────────────────────────────────────────────────
   setTimeout(() => {
     requestAnimationFrame(() => {
-      clearAiHiddenState(body);
       clearAnimStyles(body);
       body.style.overflow = 'visible';
-      animateBodyReveal(body, Math.round(dur * 0.6));
+      const revealDur = Math.round(dur * 0.6);
+      prepareTextForShow(toShow);
+      animateBodyReveal(body, revealDur);
+      requestAnimationFrame(() => {
+        runTextTransition(toShow, 'in', revealDur);
+        window.setTimeout(() => clearTextAnimStyles(toShow), revealDur + 20);
+      });
       onComplete?.();
     });
   }, dur + 20);

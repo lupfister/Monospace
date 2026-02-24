@@ -101,6 +101,23 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       }
     };
 
+    const updateLabelAndAria = () => {
+      const toggle = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
+      if (!toggle) return;
+      const label = container.querySelector('[data-ai-output-label="true"]') as HTMLElement | null;
+      if (label) {
+        label.textContent = getAiOutputLabelText(container, collapsed);
+      } else {
+        const fallbackLabel = document.createElement('span');
+        fallbackLabel.dataset.aiOutputLabel = 'true';
+        fallbackLabel.dataset.aiUi = 'true';
+        fallbackLabel.textContent = getAiOutputLabelText(container, collapsed);
+        fallbackLabel.contentEditable = 'false';
+        toggle.appendChild(fallbackLabel);
+      }
+      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    };
+
     // Helper: apply all toggle / header / spacer / label UI changes
     const applyUiChanges = () => {
       const toggle = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
@@ -118,28 +135,14 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       }
 
       ensureToggleOutsideBody();
-
-      const label = container.querySelector('[data-ai-output-label="true"]') as HTMLElement | null;
-      if (label) {
-        label.textContent = getAiOutputLabelText(container, collapsed);
-      } else if (toggle) {
-        const fallbackLabel = document.createElement('span');
-        fallbackLabel.dataset.aiOutputLabel = 'true';
-        fallbackLabel.dataset.aiUi = 'true';
-        fallbackLabel.textContent = getAiOutputLabelText(container, collapsed);
-        fallbackLabel.contentEditable = 'false';
-        toggle.appendChild(fallbackLabel);
-      }
-
-      if (toggle) {
-        toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-      }
+      updateLabelAndAria();
     };
 
     if (animate) {
+      ensureToggleOutsideBody();
+      updateLabelAndAria();
       if (collapsed) {
         // HIDE: animate body collapse first, then apply DOM changes + hidden state
-        ensureToggleOutsideBody();
         animateAiHide(body, () => {
           applyUiChanges();
           finishAnimation();
@@ -148,7 +151,6 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         // SHOW: clear hidden state + apply UI changes first so we can measure,
         // then animate the body expanding from 0
         clearAiHiddenState(body);
-        ensureToggleOutsideBody();
         applyUiChanges();
         animateAiShow(body, finishAnimation);
       }
@@ -1076,6 +1078,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
               }
             });
             selection.removeAllRanges();
+            normalizeAiHighlightSpans(editorRef.current);
           }
         }
       }
@@ -1206,6 +1209,93 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       currentBlock = currentBlock.parentElement;
     }
   }, []);
+
+  const normalizeAiHighlightSpans = (root: HTMLElement) => {
+    const highlightSelector = 'span[data-ai-highlighted="true"]';
+    const parents = new Set<HTMLElement>();
+
+    root.querySelectorAll(highlightSelector).forEach((el) => {
+      const parent = (el as HTMLElement).parentElement;
+      if (parent) parents.add(parent);
+    });
+
+    const parseTimestamp = (raw?: string | null): number | undefined => {
+      if (!raw) return undefined;
+      const num = Number(raw);
+      if (!Number.isNaN(num) && num > 0) return num;
+      const parsed = Date.parse(raw);
+      if (!Number.isNaN(parsed)) return parsed;
+      return undefined;
+    };
+
+    const isHighlightSpan = (node: Node): node is HTMLElement =>
+      node.nodeType === Node.ELEMENT_NODE &&
+      (node as HTMLElement).getAttribute('data-ai-highlighted') === 'true';
+
+    const getStyleSignature = (el: HTMLElement) => {
+      const style = el.style;
+      return [
+        style.fontFamily,
+        style.fontSize,
+        style.color,
+        style.lineHeight,
+        style.display,
+      ].join('|');
+    };
+
+    parents.forEach((parent) => {
+      let i = 0;
+      while (i < parent.childNodes.length) {
+        const node = parent.childNodes[i];
+        if (!isHighlightSpan(node)) {
+          i++;
+          continue;
+        }
+
+        const current = node as HTMLElement;
+        const currentStyle = getStyleSignature(current);
+        let currentTs = parseTimestamp(current.getAttribute('data-ai-highlighted-at'));
+
+        let j = i + 1;
+        while (j < parent.childNodes.length) {
+          const next = parent.childNodes[j];
+
+          if (next.nodeType === Node.TEXT_NODE) {
+            const text = next.textContent ?? '';
+            if (text.length === 0) {
+              next.remove();
+              continue;
+            }
+            if (text.trim().length === 0) {
+              break;
+            }
+            break;
+          }
+
+          if (isHighlightSpan(next)) {
+            const nextStyle = getStyleSignature(next);
+            if (nextStyle !== currentStyle) break;
+
+            const nextTs = parseTimestamp(next.getAttribute('data-ai-highlighted-at'));
+            if (nextTs && (!currentTs || nextTs > currentTs)) {
+              currentTs = nextTs;
+            }
+
+            while (next.firstChild) current.appendChild(next.firstChild);
+            next.remove();
+            if (currentTs) {
+              current.setAttribute('data-ai-highlighted-at', String(currentTs));
+            }
+            continue;
+          }
+
+          break;
+        }
+
+        i++;
+      }
+    });
+  };
 
   const getHighlightSpan = (range: Range): HTMLElement | null => {
     const startNode = range.startContainer;

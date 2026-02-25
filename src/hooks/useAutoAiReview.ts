@@ -53,10 +53,19 @@ const getHumanContentInfo = (html: string) => {
   container.innerHTML = html || '';
 
   let latestUpdatedAt = 0;
+  let latestAiOutputAt = 0;
   container.querySelectorAll<HTMLElement>('[data-human-updated-at]').forEach((el) => {
     const ts = parseTimestamp(el.getAttribute('data-human-updated-at'));
     if (ts && ts > latestUpdatedAt) {
       latestUpdatedAt = ts;
+    }
+  });
+  container.querySelectorAll<HTMLElement>('[data-ai-output-generated-at], [data-ai-generated-at]').forEach((el) => {
+    const ts = parseTimestamp(
+      el.getAttribute('data-ai-output-generated-at') || el.getAttribute('data-ai-generated-at')
+    );
+    if (ts && ts > latestAiOutputAt) {
+      latestAiOutputAt = ts;
     }
   });
 
@@ -74,30 +83,10 @@ const getHumanContentInfo = (html: string) => {
     text = normalizeWhitespace(container.textContent || '');
   }
 
-  let lastHumanIndex = -1;
-  let lastAiOutputIndex = -1;
-  let index = 0;
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT, null);
-  let node: Node | null;
-  while ((node = walker.nextNode())) {
-    if (!(node instanceof HTMLElement)) {
-      index += 1;
-      continue;
-    }
-    if (node.hasAttribute('data-human-text') || node.hasAttribute('data-human-block')) {
-      lastHumanIndex = index;
-    }
-    if (node.getAttribute('data-ai-output') === 'true') {
-      lastAiOutputIndex = index;
-    }
-    index += 1;
-  }
-
-  const hasAiBelowHuman = lastAiOutputIndex > lastHumanIndex && lastHumanIndex !== -1;
   return {
     text,
     latestUpdatedAt: latestUpdatedAt || undefined,
-    hasAiBelowHuman,
+    latestAiOutputAt: latestAiOutputAt || undefined,
   };
 };
 
@@ -218,14 +207,13 @@ const shouldReviewContent = (
   doc: LocalDocument,
   humanText: string,
   lastHumanUpdatedAt: number | undefined,
-  hasAiBelowHuman: boolean,
+  lastAiOutputAt: number | undefined,
   now: number,
   tabId: string,
   activeDocId: string | null,
 ) => {
   if (doc.id === activeDocId) return false;
   if (!humanText) return false;
-  if (hasAiBelowHuman) return false;
   if (humanText.length < AUTO_REVIEW_MIN_CHARS) return false;
   if (isProbablyUrl(humanText.trim())) return false;
   if (isDocOpenElsewhere(doc.id, tabId)) return false;
@@ -233,6 +221,13 @@ const shouldReviewContent = (
   const lastHuman = lastHumanUpdatedAt
     ?? parseTimestamp(doc.updatedAt)
     ?? now;
+
+  const lastAi = Math.max(
+    lastAiOutputAt ?? 0,
+    parseTimestamp(doc.aiReviewedAt) ?? 0
+  );
+
+  if (lastAi > 0 && lastHuman <= lastAi) return false;
 
   if (now - lastHuman < AUTO_REVIEW_DELAY_MS) return false;
 
@@ -325,11 +320,11 @@ export const useAutoAiReview = (
 
       const candidates = documentsRef.current
         .map((doc) => {
-          const { text, latestUpdatedAt, hasAiBelowHuman } = getHumanContentInfo(doc.content);
-          return { doc, text, latestUpdatedAt, hasAiBelowHuman };
+          const { text, latestUpdatedAt, latestAiOutputAt } = getHumanContentInfo(doc.content);
+          return { doc, text, latestUpdatedAt, latestAiOutputAt };
         })
-        .filter(({ doc, text, latestUpdatedAt, hasAiBelowHuman }) =>
-          shouldReviewContent(doc, text, latestUpdatedAt, hasAiBelowHuman, now, tabId, activeId)
+        .filter(({ doc, text, latestUpdatedAt, latestAiOutputAt }) =>
+          shouldReviewContent(doc, text, latestUpdatedAt, latestAiOutputAt, now, tabId, activeId)
         )
         .filter(({ doc }) => {
           const cooldownUntil = errorCooldownRef.current[doc.id];

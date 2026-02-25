@@ -4,6 +4,7 @@
     "private": true,
     "dependencies": {
         "@openai/agents": "*",
+        "@openai/agents-openai": "*",
         "@radix-ui/react-accordion": "^1.2.3",
         "@radix-ui/react-alert-dialog": "^1.1.6",
         "@radix-ui/react-aspect-ratio": "^1.1.2",
@@ -33,6 +34,8 @@
         "class-variance-authority": "^0.7.1",
         "clsx": "*",
         "cmdk": "^1.1.1",
+        "cors": "*",
+        "dotenv": "*",
         "embla-carousel-react": "^8.6.0",
         "express": "*",
         "input-otp": "^1.4.2",
@@ -47,15 +50,13 @@
         "sonner": "^2.0.3",
         "tailwind-merge": "*",
         "vaul": "^1.1.2",
-        "zod": "*",
-        "dotenv": "*",
-        "cors": "*",
-        "@openai/agents-openai": "*"
+        "zod": "*"
     },
     "devDependencies": {
-        "@types/node": "^20.10.0",
         "@types/cors": "^2.8.17",
+        "@types/node": "^20.10.0",
         "@vitejs/plugin-react-swc": "^3.10.2",
+        "agentation": "^2.2.1",
         "concurrently": "*",
         "tsx": "*",
         "vite": "6.3.5"

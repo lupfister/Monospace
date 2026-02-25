@@ -152,6 +152,59 @@
         user-select: none;
         pointer-events: none;
       }
+
+      @keyframes home-text-shimmer {
+        0% {
+          background-position: 180% 0;
+        }
+        100% {
+          background-position: -180% 0;
+        }
+      }
+
+      .home-list-text {
+        color: transparent;
+        background-image: linear-gradient(
+          0deg,
+          var(--home-text-color, currentColor),
+          var(--home-text-color, currentColor)
+        );
+        background-size: 100% 100%;
+        background-position: 0 0;
+        background-repeat: no-repeat;
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+
+      @supports (background: color-mix(in srgb, #000 0%, #000 100%)) {
+        .home-list-item:hover .home-list-text,
+        .home-list-item:focus-visible .home-list-text {
+          background-image: linear-gradient(
+            120deg,
+            color-mix(in srgb, var(--home-text-color), #000 22%) 0%,
+            color-mix(in srgb, var(--home-text-color), #000 22%) 38%,
+            color-mix(in srgb, var(--home-text-color), #000 48%) 50%,
+            color-mix(in srgb, var(--home-text-color), #000 22%) 62%,
+            color-mix(in srgb, var(--home-text-color), #000 22%) 100%
+          );
+          background-size: 260% 100%;
+          background-position: 180% 0;
+          background-repeat: no-repeat;
+          -webkit-text-fill-color: transparent;
+          animation: home-text-shimmer 1.2s linear;
+          will-change: background-position;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        @supports (background: color-mix(in srgb, #000 0%, #000 100%)) {
+          .home-list-item:hover .home-list-text,
+          .home-list-item:focus-visible .home-list-text {
+            animation: none;
+          }
+        }
+      }
     </style>
 
 <body>

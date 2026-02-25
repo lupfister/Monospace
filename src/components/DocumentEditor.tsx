@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { MoveHorizontal, Sparkles, Loader2 } from 'lucide-react';
-import { createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan, rehydrateSourceLinks } from '../lib/textStyles';
+import { AI_TEXT_STYLE, createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan, rehydrateSourceLinks } from '../lib/textStyles';
 import { isProbablyUrl } from '../lib/linkPreviews';
 import { applyAiHiddenState, clearAiHiddenState, animateAiHide, animateAiShow } from '../lib/aiOutputVisibility';
 import { formatAiOutputLabel } from '../lib/aiOutputLabel';
@@ -14,15 +14,106 @@ import { rehydrateInteractiveSources, rehydrateViewedSourcesToggles } from '../l
 import { persistViewedSourcesForDoc, persistViewedSourcesForOutput } from '../lib/aiOutputSources';
 import type { LocalDocument } from '../lib/localDocuments';
 
+type AiReviewUpdate = {
+  aiReviewedAt: string;
+  aiExcerpt?: string;
+};
+
 type DocumentEditorProps = {
   doc: LocalDocument;
   onSave: (docId: string, content: string, title: string) => void;
-  onBack: () => void;
+  onAiReview?: (docId: string, update: AiReviewUpdate) => void;
+  onFirstInput?: (content: string) => void;
+  isDraftActive?: boolean;
+  onDraftEmpty?: () => void;
+  autoFocus?: boolean;
+  placeholder?: string;
+  placeholderMode?: 'inline' | 'overlay';
+  editorMinHeightClass?: string;
+  footer?: React.ReactNode;
 };
 
-export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
+const AI_EXCERPT_MAX = 160;
+
+const normalizeWhitespace = (value: string) => value.replace(/\s+/g, ' ').trim();
+
+const extractLastSentence = (text: string) => {
+  const sentences = text.match(/[^.!?]+[.!?]+(?:["')\]]+)?/g);
+  if (!sentences || sentences.length === 0) return '';
+  const normalized = sentences.map((sentence) => normalizeWhitespace(sentence)).filter(Boolean);
+  if (normalized.length === 0) return '';
+  for (let i = normalized.length - 1; i >= 0; i -= 1) {
+    if (normalized[i].length >= 20) return normalized[i];
+  }
+  return normalized[normalized.length - 1];
+};
+
+const extractLatestUserExcerpt = (root: HTMLElement | null): string => {
+  if (!root) return '';
+
+  const clone = root.cloneNode(true) as HTMLElement;
+  clone
+    .querySelectorAll('[data-ai-output="true"], [data-ai-text="true"], [data-ai-origin="true"], [data-ai-output-toggle="true"]')
+    .forEach((el) => el.remove());
+
+  const blocks = Array.from(clone.querySelectorAll('[data-human-block="true"]'));
+  const candidates = blocks.length > 0
+    ? blocks
+    : Array.from(clone.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote'));
+
+  const extractReadableTextFromBlock = (block: HTMLElement) => {
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null);
+    let text = '';
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const chunk = (node as Text).data;
+      if (!chunk) continue;
+      if (!text) {
+        text = chunk;
+        continue;
+      }
+      const lastChar = text[text.length - 1] ?? '';
+      const firstChar = chunk[0] ?? '';
+      const needsSpace = !/\s/.test(lastChar)
+        && !/\s/.test(firstChar)
+        && /[A-Za-z0-9]/.test(lastChar)
+        && /[A-Za-z0-9]/.test(firstChar);
+      text = needsSpace ? `${text} ${chunk}` : `${text}${chunk}`;
+    }
+    const normalized = normalizeWhitespace(text);
+    return normalized.replace(/([a-z0-9])([A-Z])/g, '$1 $2');
+  };
+
+  for (let i = candidates.length - 1; i >= 0; i -= 1) {
+    const text = extractReadableTextFromBlock(candidates[i] as HTMLElement);
+    if (!text) continue;
+    const lastSentence = extractLastSentence(text);
+    const candidate = lastSentence || text;
+    if (candidate.length <= AI_EXCERPT_MAX) return candidate;
+    return candidate.slice(0, AI_EXCERPT_MAX);
+  }
+
+  return '';
+};
+
+export function DocumentEditor({
+  doc,
+  onSave,
+  onAiReview,
+  onFirstInput,
+  isDraftActive = false,
+  onDraftEmpty,
+  autoFocus = false,
+  placeholder,
+  placeholderMode = 'inline',
+  editorMinHeightClass = 'min-h-screen',
+  footer,
+}: DocumentEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [isEditorEmpty, setIsEditorEmpty] = useState(true);
+  const hasUserInputRef = useRef(false);
+  const didNotifyEmptyRef = useRef(false);
 
   const { hydrateSearchResultImages } = useLinkHydrator(editorRef);
 
@@ -48,7 +139,13 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
   const [selectedModel, setSelectedModel] = useState('gpt-5-mini');
   const [isTitleGenerating, setIsTitleGenerating] = useState(false);
   const titleGeneratedRef = useRef<Set<string>>(new Set());
+  const autosaveTimeoutRef = useRef<number | null>(null);
   const VIEWED_SOURCES_HEADER_SELECTOR = '[data-viewed-sources-header="true"]';
+
+  const placeholderText = placeholder ?? '';
+  const hasPlaceholder = Boolean(placeholderText);
+  const useOverlayPlaceholder = hasPlaceholder && placeholderMode === 'overlay';
+  const editorBackgroundClass = useOverlayPlaceholder ? 'bg-transparent' : 'bg-white';
 
   const getAiOutputContainer = (node: Node | null): HTMLElement | null => {
     if (!node) return null;
@@ -358,7 +455,15 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       }
     });
     persistViewedSourcesForOutput(doc.id, outputContainer);
-  }, [doc.id, persistViewedSourcesForOutput, setAiOutputCollapsed]);
+    if (onAiReview) {
+      const excerpt = extractLatestUserExcerpt(root);
+      const update: AiReviewUpdate = {
+        aiReviewedAt: new Date().toISOString(),
+        ...(excerpt ? { aiExcerpt: excerpt } : {}),
+      };
+      onAiReview(doc.id, update);
+    }
+  }, [doc.id, onAiReview, persistViewedSourcesForOutput, setAiOutputCollapsed]);
 
   const { handleAiReview, cancelReview, isLoading, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(
     editorRef,
@@ -366,6 +471,21 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     hydrateSearchResultImages,
     handleAiOutputInserted
   );
+
+  useEffect(() => {
+    if (!autoFocus) return;
+    if (!editorRef.current) return;
+    const node = editorRef.current;
+    node.focus();
+    const selection = window.getSelection();
+    if (selection) {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+  }, [autoFocus, doc.id]);
 
 
   // Track selection changes to support toolbar actions that steal focus (like Select)
@@ -466,9 +586,61 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
   }, []);
 
   const isPlaceholderHtml = useCallback((html: string) => {
+    if (!hasPlaceholder) return false;
     const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    return text === 'Start writing...';
-  }, []);
+    return text === placeholderText;
+  }, [hasPlaceholder, placeholderText]);
+
+  const updateEditorEmpty = useCallback(() => {
+    const text = normalizeWhitespace(editorRef.current?.textContent ?? '');
+    const empty = !text || (!useOverlayPlaceholder && hasPlaceholder && text === placeholderText);
+    setIsEditorEmpty(empty);
+  }, [hasPlaceholder, placeholderText, useOverlayPlaceholder]);
+
+  const signalFirstInput = useCallback(() => {
+    if (hasUserInputRef.current) return;
+    hasUserInputRef.current = true;
+    if (!onFirstInput || !editorRef.current) return;
+    requestAnimationFrame(() => {
+      if (!editorRef.current) return;
+      onFirstInput(editorRef.current.innerHTML);
+    });
+  }, [onFirstInput]);
+
+  const scheduleEditorEmptyUpdate = useCallback(() => {
+    requestAnimationFrame(() => {
+      updateEditorEmpty();
+    });
+  }, [updateEditorEmpty]);
+
+  useEffect(() => {
+    hasUserInputRef.current = false;
+    didNotifyEmptyRef.current = false;
+    updateEditorEmpty();
+  }, [doc.id, updateEditorEmpty]);
+
+  useEffect(() => {
+    if (!isDraftActive || !onDraftEmpty) return;
+    if (!isEditorEmpty) {
+      didNotifyEmptyRef.current = false;
+      return;
+    }
+    if (!hasUserInputRef.current) return;
+    if (didNotifyEmptyRef.current) return;
+    didNotifyEmptyRef.current = true;
+    onDraftEmpty();
+  }, [isDraftActive, isEditorEmpty, onDraftEmpty]);
+
+  const handleEditorInput = () => {
+    updateEditorEmpty();
+    if (!hasUserInputRef.current && editorRef.current) {
+      const text = normalizeWhitespace(editorRef.current.textContent || '');
+      if (text) {
+        signalFirstInput();
+      }
+    }
+    scheduleAutosave();
+  };
 
   const isAiElement = useCallback((el: HTMLElement): boolean => {
     return el.getAttribute('data-ai-text') === 'true' || el.getAttribute('data-ai-origin') === 'true';
@@ -494,6 +666,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       rehydrateSourceLinks(editorRef.current);
       rehydrateInteractiveSources(editorRef.current);
       persistViewedSourcesForDoc(doc.id, editorRef.current);
+      updateEditorEmpty();
 
       editorRef.current.querySelectorAll<HTMLElement>('[data-ai-output-toggle="true"]').forEach((toggle) => {
         toggle.dataset.aiUi = 'true';
@@ -567,6 +740,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     rehydrateSourceLinks,
     rehydrateInteractiveSources,
     persistViewedSourcesForDoc,
+    updateEditorEmpty,
   ]);
 
 
@@ -672,12 +846,12 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     [doc.id, isTitleGenerating, onSave, selectedModel]
   );
 
-  const persistDocument = (showNotification: boolean) => {
+  const persistDocument = useCallback((showNotification: boolean) => {
     if (!editorRef.current) return;
 
     const rawContent = editorRef.current.innerHTML;
-    const textContent = (editorRef.current.textContent || '').replace(/\s+/g, ' ').trim();
-    const isPlaceholder = textContent === 'Start writing...';
+    const textContent = normalizeWhitespace(editorRef.current.textContent || '');
+    const isPlaceholder = !textContent || (!useOverlayPlaceholder && hasPlaceholder && textContent === placeholderText);
     const content = isPlaceholder ? '' : rawContent;
     const title = !textContent || isPlaceholder ? 'Untitled' : doc.title || 'Untitled';
 
@@ -695,15 +869,34 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       document.body.appendChild(notification);
       setTimeout(() => notification.remove(), 2000);
     }
+  }, [doc.id, doc.title, generateTitleFromContent, onSave, placeholderText, useOverlayPlaceholder]);
+
+  const clearAutosave = () => {
+    if (autosaveTimeoutRef.current) {
+      window.clearTimeout(autosaveTimeoutRef.current);
+      autosaveTimeoutRef.current = null;
+    }
   };
+
+  const scheduleAutosave = useCallback(() => {
+    clearAutosave();
+    autosaveTimeoutRef.current = window.setTimeout(() => {
+      autosaveTimeoutRef.current = null;
+      persistDocument(false);
+    }, 800);
+  }, [persistDocument]);
+
+  useEffect(() => {
+    return () => clearAutosave();
+  }, []);
+
+  useEffect(() => {
+    clearAutosave();
+  }, [doc.id]);
 
   const handleSave = () => {
+    clearAutosave();
     persistDocument(true);
-  };
-
-  const handleBack = () => {
-    persistDocument(false);
-    onBack();
   };
 
   const checkClickInSelection = (x: number, y: number): boolean => {
@@ -1318,6 +1511,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || !editorRef.current) return;
     let range = selection.getRangeAt(0);
+    signalFirstInput();
 
     const tagHumanBlock = (node: Node | null) => {
       const el = node?.nodeType === Node.ELEMENT_NODE
@@ -1349,13 +1543,13 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
 
     // Clear placeholder logic
-    if (editorRef.current) {
+    if (!useOverlayPlaceholder && hasPlaceholder && editorRef.current) {
       const firstChild = editorRef.current.firstElementChild;
       if (firstChild && firstChild.tagName === 'P') {
         const textContent = firstChild.textContent?.trim();
         const computedStyle = window.getComputedStyle(firstChild);
         const isGray = computedStyle.color === 'rgb(110, 110, 110)' || computedStyle.color === '#6e6e6e';
-        if (textContent === 'Start writing...' && isGray) {
+        if (textContent === placeholderText && isGray) {
           editorRef.current.innerHTML = '';
           const newRange = document.createRange();
           newRange.setStart(editorRef.current, 0);
@@ -1404,6 +1598,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
           selection.removeAllRanges();
           selection.addRange(range);
           tagHumanBlock(humanSpan);
+          scheduleEditorEmptyUpdate();
           return;
         }
       }
@@ -1422,6 +1617,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         selection.removeAllRanges();
         selection.addRange(range);
         tagHumanBlock(parent);
+        scheduleEditorEmptyUpdate();
         return;
       }
     }
@@ -1440,6 +1636,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
           selection.removeAllRanges();
           selection.addRange(range);
           tagHumanBlock(element);
+          scheduleEditorEmptyUpdate();
           return;
         }
       }
@@ -1453,6 +1650,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     selection.removeAllRanges();
     selection.addRange(range);
     tagHumanBlock(span);
+    scheduleEditorEmptyUpdate();
   };
 
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -1615,6 +1813,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
     const pastedText = e.clipboardData.getData('text/plain');
     if (!pastedText) return;
+    signalFirstInput();
 
     // Get the correct range for insertion
     let range: Range;
@@ -1636,18 +1835,20 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
     claimAiContent(range.commonAncestorContainer);
     // Clear placeholder logic if we're at the beginning and the placeholder is there
-    const firstChild = editorRef.current.firstElementChild;
-    if (firstChild && firstChild.tagName === 'P') {
-      const textContent = firstChild.textContent?.trim();
-      const computedStyle = window.getComputedStyle(firstChild);
-      const isGray = computedStyle.color === 'rgb(110, 110, 110)' || computedStyle.color === '#6e6e6e';
-      if (textContent === 'Start writing...' && isGray) {
-        editorRef.current.innerHTML = '';
-        range = document.createRange();
-        range.setStart(editorRef.current, 0);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
+    if (!useOverlayPlaceholder && hasPlaceholder) {
+      const firstChild = editorRef.current.firstElementChild;
+      if (firstChild && firstChild.tagName === 'P') {
+        const textContent = firstChild.textContent?.trim();
+        const computedStyle = window.getComputedStyle(firstChild);
+        const isGray = computedStyle.color === 'rgb(110, 110, 110)' || computedStyle.color === '#6e6e6e';
+        if (textContent === placeholderText && isGray) {
+          editorRef.current.innerHTML = '';
+          range = document.createRange();
+          range.setStart(editorRef.current, 0);
+          range.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
       }
     }
 
@@ -1668,6 +1869,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
       newRange.collapse(true);
       selection.removeAllRanges();
       selection.addRange(newRange);
+      scheduleAutosave();
       return;
     }
 
@@ -1682,6 +1884,8 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
+    scheduleEditorEmptyUpdate();
+    scheduleAutosave();
   };
 
   const handleMarginTextPositionChange = (id: string, x: number, y: number) => {
@@ -1702,6 +1906,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
     editorRef.current.innerHTML = marginText.htmlContent;
     setMarginTexts((prev: any[]) => prev.filter((m: any) => m.id !== id));
     editorRef.current.focus();
+    scheduleAutosave();
   };
 
   const handleDividerMouseDown = (e: React.MouseEvent) => {
@@ -1748,18 +1953,12 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
 
   return (
     <div className="w-full min-h-screen">
-      <div className="sticky top-0 z-10 bg-white border-b border-gray-200 px-2 py-2">
+      <div className="sticky top-0 z-[9999] bg-white border-b border-gray-200 pl-4 pr-2 py-2">
         <div className="w-full mx-auto flex items-center justify-between text-gray-400">
           <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={handleBack}
-              className="px-2 py-1 text-xs text-gray-600 hover:text-gray-900 transition-colors"
-            >
-              Documents
-            </button>
+            <span className="truncate max-w-[220px]" style={AI_TEXT_STYLE}>Monospace</span>
             <span className="text-xs text-gray-300">/</span>
-            <span className="text-xs text-gray-500 truncate max-w-[220px]">
+            <span className="truncate max-w-[220px]" style={AI_TEXT_STYLE}>
               {doc.title || 'Untitled'}
             </span>
           </div>
@@ -1769,7 +1968,7 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
               id="model-select"
               value={OPENAI_MODEL_OPTIONS.includes(selectedModel) ? selectedModel : OPENAI_MODEL_OPTIONS[0]}
               onChange={handleModelChange}
-              className="text-xs border border-gray-200 rounded px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+              className="text-xs border border-gray-200 rounded pl-1 pr-5 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
               aria-label="Select AI model"
             >
               {OPENAI_MODEL_OPTIONS.map((modelId) => (<option key={modelId} value={modelId}>{modelId}</option>))}
@@ -1845,19 +2044,51 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
         )}
 
         <div className="flex-1 min-w-0 overflow-auto">
-          <div
-            ref={editorRef}
-            contentEditable
-            suppressContentEditableWarning
-            className="min-h-screen bg-white p-8 focus:outline-none prose prose-lg max-w-3xl mx-auto font-normal [&_p]:my-3 [&_p]:min-h-[1.5em] [&_p[data-ai-output-toggle='true']]:my-0 [&_p[data-ai-output-spacer='true']]:my-0 whitespace-pre-wrap"
-            spellCheck
-            onMouseDown={handleMouseDown}
-            onClick={handleClick}
-            onKeyDown={handleEditorKeyDown}
-            onBeforeInput={handleBeforeInput}
-            onPaste={handlePaste}
-          >
-            <p className="text-[#6e6e6e]" style={{ fontFamily: 'Inter, sans-serif', fontSize: '18px', fontWeight: 350, fontVariationSettings: '"wght" 350' }}>Start writing...</p>
+          <div className="relative max-w-3xl mx-auto">
+            {useOverlayPlaceholder && isEditorEmpty && hasPlaceholder && (
+              <div className="pointer-events-none absolute inset-0 z-0">
+                <div
+                  className="p-8 text-[#6e6e6e]"
+                  style={{
+                    fontFamily: AI_TEXT_STYLE.fontFamily,
+                    fontSize: AI_TEXT_STYLE.fontSize,
+                    fontWeight: AI_TEXT_STYLE.fontWeight,
+                    fontVariationSettings: AI_TEXT_STYLE.fontVariationSettings,
+                    lineHeight: '1.5',
+                  }}
+                >
+                  <p className="mt-0.75">{placeholderText}</p>
+                </div>
+              </div>
+            )}
+            <div
+              ref={editorRef}
+              contentEditable
+              suppressContentEditableWarning
+              className={`${editorMinHeightClass} ${editorBackgroundClass} relative z-10 p-8 focus:outline-none prose prose-lg font-normal [&_p]:my-3 [&_p]:min-h-[1.5em] [&_p[data-ai-output-toggle='true']]:my-0 [&_p[data-ai-output-spacer='true']]:my-0 whitespace-pre-wrap transition-[min-height] duration-300`}
+              spellCheck
+              onMouseDown={handleMouseDown}
+              onClick={handleClick}
+              onKeyDown={handleEditorKeyDown}
+              onBeforeInput={handleBeforeInput}
+              onPaste={handlePaste}
+              onInput={handleEditorInput}
+            >
+              {!useOverlayPlaceholder && hasPlaceholder && isEditorEmpty && (
+                <p
+                  className="text-[#6e6e6e]"
+                  style={{
+                    fontFamily: AI_TEXT_STYLE.fontFamily,
+                    fontSize: AI_TEXT_STYLE.fontSize,
+                    fontWeight: AI_TEXT_STYLE.fontWeight,
+                    fontVariationSettings: AI_TEXT_STYLE.fontVariationSettings,
+                    lineHeight: '1.5',
+                  }}
+                >
+                  {placeholderText}
+                </p>
+              )}
+            </div>
           </div>
         </div>
 
@@ -1886,6 +2117,12 @@ export function DocumentEditor({ doc, onSave, onBack }: DocumentEditorProps) {
           </>
         )}
       </div>
+
+      {footer && (
+        <div className="max-w-3xl mx-auto px-8 pb-16">
+          {footer}
+        </div>
+      )}
 
       <style dangerouslySetInnerHTML={{
         __html: `

@@ -11,10 +11,21 @@ export const useLocalDocuments = () => {
     persistDocuments(documents);
   }, [documents]);
 
-  const createDocument = useCallback(() => {
-    const doc = createLocalDocument();
+  const createDocument = useCallback((content: string = '') => {
+    const doc = createLocalDocument(content);
     setDocuments((prev) => sortDocuments([doc, ...prev]));
     return doc;
+  }, []);
+
+  const insertDocument = useCallback((doc: LocalDocument) => {
+    setDocuments((prev) => {
+      const exists = prev.some((item) => item.id === doc.id);
+      if (exists) {
+        const next = prev.map((item) => (item.id === doc.id ? { ...item, ...doc } : item));
+        return sortDocuments(next);
+      }
+      return sortDocuments([doc, ...prev]);
+    });
   }, []);
 
   const updateDocument = useCallback((id: string, updates: Partial<LocalDocument>) => {
@@ -24,5 +35,9 @@ export const useLocalDocuments = () => {
     });
   }, []);
 
-  return { documents, createDocument, updateDocument };
+  const deleteDocument = useCallback((id: string) => {
+    setDocuments((prev) => prev.filter((doc) => doc.id !== id));
+  }, []);
+
+  return { documents, createDocument, insertDocument, updateDocument, deleteDocument };
 };

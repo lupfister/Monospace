@@ -1,4 +1,4 @@
-export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search' | 'explore_source' | 'title';
+export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search' | 'explore_source' | 'title' | 'last_user_sentence';
 
 export type SearchType = 'video' | 'image' | 'web';
 
@@ -68,7 +68,7 @@ export interface ContextBlock {
   highlighted?: boolean;
 }
 
-type InternalAiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search' | 'explore_source' | 'title';
+type InternalAiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search' | 'explore_source' | 'title' | 'last_user_sentence';
 
 const mapActionToInternal = (action: AiAction): InternalAiAction => {
   if (action === 'search') return 'plan_search';

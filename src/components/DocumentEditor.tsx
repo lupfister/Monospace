@@ -16,7 +16,6 @@ import type { LocalDocument } from '../lib/localDocuments';
 
 type AiReviewUpdate = {
   aiReviewedAt: string;
-  aiExcerpt?: string;
 };
 
 type DocumentEditorProps = {
@@ -31,70 +30,17 @@ type DocumentEditorProps = {
   placeholderMode?: 'inline' | 'overlay';
   editorMinHeightClass?: string;
   footer?: React.ReactNode;
+  showHeader?: boolean;
+  onHeaderHomeClick?: () => void;
 };
 
-const AI_EXCERPT_MAX = 160;
+const HISTORY_STORAGE_PREFIX = 'monospace.history.v1';
+const HISTORY_LIMIT = 100;
+const HISTORY_SNAPSHOT_DELAY = 300;
 
-const normalizeWhitespace = (value: string) => value.replace(/\s+/g, ' ').trim();
+const normalizeWhitespace = (value: string) =>
+  value.replace(/[\u200B\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
 
-const extractLastSentence = (text: string) => {
-  const sentences = text.match(/[^.!?]+[.!?]+(?:["')\]]+)?/g);
-  if (!sentences || sentences.length === 0) return '';
-  const normalized = sentences.map((sentence) => normalizeWhitespace(sentence)).filter(Boolean);
-  if (normalized.length === 0) return '';
-  for (let i = normalized.length - 1; i >= 0; i -= 1) {
-    if (normalized[i].length >= 20) return normalized[i];
-  }
-  return normalized[normalized.length - 1];
-};
-
-const extractLatestUserExcerpt = (root: HTMLElement | null): string => {
-  if (!root) return '';
-
-  const clone = root.cloneNode(true) as HTMLElement;
-  clone
-    .querySelectorAll('[data-ai-output="true"], [data-ai-text="true"], [data-ai-origin="true"], [data-ai-output-toggle="true"]')
-    .forEach((el) => el.remove());
-
-  const blocks = Array.from(clone.querySelectorAll('[data-human-block="true"]'));
-  const candidates = blocks.length > 0
-    ? blocks
-    : Array.from(clone.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote'));
-
-  const extractReadableTextFromBlock = (block: HTMLElement) => {
-    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null);
-    let text = '';
-    let node: Node | null;
-    while ((node = walker.nextNode())) {
-      const chunk = (node as Text).data;
-      if (!chunk) continue;
-      if (!text) {
-        text = chunk;
-        continue;
-      }
-      const lastChar = text[text.length - 1] ?? '';
-      const firstChar = chunk[0] ?? '';
-      const needsSpace = !/\s/.test(lastChar)
-        && !/\s/.test(firstChar)
-        && /[A-Za-z0-9]/.test(lastChar)
-        && /[A-Za-z0-9]/.test(firstChar);
-      text = needsSpace ? `${text} ${chunk}` : `${text}${chunk}`;
-    }
-    const normalized = normalizeWhitespace(text);
-    return normalized.replace(/([a-z0-9])([A-Z])/g, '$1 $2');
-  };
-
-  for (let i = candidates.length - 1; i >= 0; i -= 1) {
-    const text = extractReadableTextFromBlock(candidates[i] as HTMLElement);
-    if (!text) continue;
-    const lastSentence = extractLastSentence(text);
-    const candidate = lastSentence || text;
-    if (candidate.length <= AI_EXCERPT_MAX) return candidate;
-    return candidate.slice(0, AI_EXCERPT_MAX);
-  }
-
-  return '';
-};
 
 export function DocumentEditor({
   doc,
@@ -108,6 +54,8 @@ export function DocumentEditor({
   placeholderMode = 'inline',
   editorMinHeightClass = 'min-h-screen',
   footer,
+  showHeader = true,
+  onHeaderHomeClick,
 }: DocumentEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -140,12 +88,27 @@ export function DocumentEditor({
   const [isTitleGenerating, setIsTitleGenerating] = useState(false);
   const titleGeneratedRef = useRef<Set<string>>(new Set());
   const autosaveTimeoutRef = useRef<number | null>(null);
+  const scheduleAutosaveRef = useRef<() => void>(() => { });
+  const handleSaveRef = useRef<() => void>(() => { });
+  const scheduleEditorEmptyUpdateRef = useRef<() => void>(() => { });
+  const historySnapshotTimeoutRef = useRef<number | null>(null);
+  const historyStateRef = useRef<{ stack: string[]; index: number }>({ stack: [], index: -1 });
+  const lastSnapshotRef = useRef('');
+  const persistHistoryStateRef = useRef<() => void>(() => { });
+  const queueHistorySnapshotRef = useRef<() => void>(() => { });
+  const handleUndoRef = useRef<() => void>(() => { });
+  const handleRedoRef = useRef<() => void>(() => { });
+  const isApplyingHistoryRef = useRef(false);
+  const isHydratingRef = useRef(false);
+  const initializedHistoryDocIdRef = useRef<string | null>(null);
   const VIEWED_SOURCES_HEADER_SELECTOR = '[data-viewed-sources-header="true"]';
 
   const placeholderText = placeholder ?? '';
   const hasPlaceholder = Boolean(placeholderText);
   const useOverlayPlaceholder = hasPlaceholder && placeholderMode === 'overlay';
   const editorBackgroundClass = useOverlayPlaceholder ? 'bg-transparent' : 'bg-white';
+  const scrollCenterPadding = showHeader ? 'calc(50vh - 24px)' : '50vh';
+  const scrollTopPadding = '24px';
 
   const getAiOutputContainer = (node: Node | null): HTMLElement | null => {
     if (!node) return null;
@@ -218,17 +181,14 @@ export function DocumentEditor({
     // Helper: apply all toggle / header / spacer / label UI changes
     const applyUiChanges = () => {
       const toggle = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
-      const spacer = container.querySelector('[data-ai-output-spacer="true"]') as HTMLElement | null;
       const header = body.querySelector(VIEWED_SOURCES_HEADER_SELECTOR) as HTMLElement | null;
 
       if (collapsed) {
         if (header) header.style.display = 'none';
         if (toggle) toggle.style.display = 'inline-flex';
-        if (spacer) spacer.style.display = 'none';
       } else {
         if (header) header.style.display = 'inline-flex';
         if (toggle) toggle.style.display = 'inline-flex';
-        if (spacer) spacer.style.display = '';
       }
 
       ensureToggleOutsideBody();
@@ -239,17 +199,34 @@ export function DocumentEditor({
       ensureToggleOutsideBody();
       updateLabelAndAria();
       if (collapsed) {
-        // HIDE: animate body collapse first, then apply DOM changes + hidden state
+        // HIDE: record toggle position before collapse so we can scroll-anchor it
+        const toggleEl = container.querySelector('[data-ai-output-toggle="true"]') as HTMLElement | null;
+        const preCollapseToggleTop = toggleEl
+          ? toggleEl.getBoundingClientRect().top + window.scrollY
+          : null;
+
         animateAiHide(body, () => {
           applyUiChanges();
           finishAnimation();
+
+          // Scroll-anchor: keep the toggle at the same visual position after content collapses
+          if (toggleEl && preCollapseToggleTop !== null) {
+            const postToggleTop = toggleEl.getBoundingClientRect().top + window.scrollY;
+            const delta = postToggleTop - preCollapseToggleTop;
+            if (Math.abs(delta) > 1) {
+              window.scrollBy({ top: delta, behavior: 'smooth' });
+            }
+          }
         });
       } else {
-        // SHOW: clear hidden state + apply UI changes first so we can measure,
-        // then animate the body expanding from 0
-        clearAiHiddenState(body);
+        // SHOW: apply UI changes first; animateAiShow handles clearAiHiddenState
+        // internally so it can measure the correct start height before revealing.
         applyUiChanges();
-        animateAiShow(body, finishAnimation);
+        animateAiShow(body, () => {
+          finishAnimation();
+          // Scroll to reveal newly expanded content
+          body.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
       }
     } else {
       if (collapsed) {
@@ -456,14 +433,17 @@ export function DocumentEditor({
     });
     persistViewedSourcesForOutput(doc.id, outputContainer);
     if (onAiReview) {
-      const excerpt = extractLatestUserExcerpt(root);
-      const update: AiReviewUpdate = {
-        aiReviewedAt: new Date().toISOString(),
-        ...(excerpt ? { aiExcerpt: excerpt } : {}),
-      };
-      onAiReview(doc.id, update);
+      onAiReview(doc.id, { aiReviewedAt: new Date().toISOString() });
     }
-  }, [doc.id, onAiReview, persistViewedSourcesForOutput, setAiOutputCollapsed]);
+    scheduleEditorEmptyUpdateRef.current();
+    scheduleAutosaveRef.current();
+    queueHistorySnapshotRef.current();
+  }, [
+    doc.id,
+    onAiReview,
+    persistViewedSourcesForOutput,
+    setAiOutputCollapsed,
+  ]);
 
   const { handleAiReview, cancelReview, isLoading, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(
     editorRef,
@@ -612,6 +592,7 @@ export function DocumentEditor({
       updateEditorEmpty();
     });
   }, [updateEditorEmpty]);
+  scheduleEditorEmptyUpdateRef.current = scheduleEditorEmptyUpdate;
 
   useEffect(() => {
     hasUserInputRef.current = false;
@@ -625,25 +606,41 @@ export function DocumentEditor({
       didNotifyEmptyRef.current = false;
       return;
     }
-    if (!hasUserInputRef.current) return;
     if (didNotifyEmptyRef.current) return;
     didNotifyEmptyRef.current = true;
     onDraftEmpty();
   }, [isDraftActive, isEditorEmpty, onDraftEmpty]);
 
   const handleEditorInput = () => {
-    updateEditorEmpty();
-    if (!hasUserInputRef.current && editorRef.current) {
-      const text = normalizeWhitespace(editorRef.current.textContent || '');
+    requestAnimationFrame(() => {
+      const text = normalizeWhitespace(editorRef.current?.textContent ?? '');
+      updateEditorEmpty();
       if (text) {
-        signalFirstInput();
+        if (!hasUserInputRef.current) {
+          signalFirstInput();
+        }
+        didNotifyEmptyRef.current = false;
+      } else if (isDraftActive && onDraftEmpty && !didNotifyEmptyRef.current) {
+        didNotifyEmptyRef.current = true;
+        onDraftEmpty();
       }
-    }
+    });
     scheduleAutosave();
+    queueHistorySnapshot();
   };
 
   const isAiElement = useCallback((el: HTMLElement): boolean => {
     return el.getAttribute('data-ai-text') === 'true' || el.getAttribute('data-ai-origin') === 'true';
+  }, []);
+
+  const isUiMutationNode = useCallback((node: Node): boolean => {
+    const element = node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+    if (!element) return false;
+    if (element.closest('.ai-loading-shimmer')) return true;
+    if (element.closest('[data-loading-phase]')) return true;
+    return Boolean(
+      element.closest('[data-ai-ui="true"], [data-ai-output-toggle="true"], [data-ai-output-spacer="true"], [data-ai-output-icon="true"], [data-ai-output-label="true"]')
+    );
   }, []);
 
 
@@ -651,15 +648,23 @@ export function DocumentEditor({
   useEffect(() => {
     document.execCommand('defaultParagraphSeparator', false, 'p');
     if (!editorRef.current) return;
-    if (!doc.content || isPlaceholderHtml(doc.content)) return;
+    isHydratingRef.current = true;
+    if (!doc.content || isPlaceholderHtml(doc.content)) {
+      isHydratingRef.current = false;
+      return;
+    }
 
     if (editorRef.current.innerHTML === doc.content) {
+      isHydratingRef.current = false;
       return;
     }
 
     editorRef.current.innerHTML = doc.content;
     requestAnimationFrame(() => {
-      if (!editorRef.current) return;
+      if (!editorRef.current) {
+        isHydratingRef.current = false;
+        return;
+      }
       hydrateSearchResultImages(editorRef.current);
       normalizeContent();
       rehydrateViewedSourcesToggles(editorRef.current);
@@ -728,6 +733,14 @@ export function DocumentEditor({
       });
 
       rehydrateAiOutputs();
+      const normalizedHtml = isPlaceholderHtml(editorRef.current.innerHTML) ? '' : editorRef.current.innerHTML;
+      const history = historyStateRef.current;
+      if (history.stack.length === 1 && history.index === 0 && history.stack[0] !== normalizedHtml) {
+        history.stack[0] = normalizedHtml;
+        lastSnapshotRef.current = normalizedHtml;
+        persistHistoryStateRef.current();
+      }
+      isHydratingRef.current = false;
     });
   }, [
     doc.content,
@@ -791,17 +804,17 @@ export function DocumentEditor({
 
       if (ctrlKey && e.key === 's') {
         e.preventDefault();
-        handleSave();
+        handleSaveRef.current();
       }
 
       if (ctrlKey && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
-        document.execCommand('undo');
+        handleUndoRef.current();
       }
 
       if ((ctrlKey && e.key === 'y') || (ctrlKey && e.shiftKey && e.key === 'z')) {
         e.preventDefault();
-        document.execCommand('redo');
+        handleRedoRef.current();
       }
 
       if (ctrlKey && e.key === '/') {
@@ -885,6 +898,197 @@ export function DocumentEditor({
       persistDocument(false);
     }, 800);
   }, [persistDocument]);
+  scheduleAutosaveRef.current = scheduleAutosave;
+
+  const getHistoryStorageKey = useCallback(() => `${HISTORY_STORAGE_PREFIX}.${doc.id}`, [doc.id]);
+
+  const persistHistoryState = useCallback((state: { stack: string[]; index: number } = historyStateRef.current) => {
+    if (typeof window === 'undefined') return;
+    try {
+      sessionStorage.setItem(getHistoryStorageKey(), JSON.stringify(state));
+    } catch {
+      // Ignore storage failures
+    }
+  }, [getHistoryStorageKey]);
+  persistHistoryStateRef.current = () => persistHistoryState();
+
+  const readHistoryState = useCallback(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const raw = sessionStorage.getItem(getHistoryStorageKey());
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || !Array.isArray(parsed.stack)) return null;
+      const stack = parsed.stack.filter((entry: unknown): entry is string => typeof entry === 'string');
+      if (stack.length === 0) return null;
+      let index = typeof parsed.index === 'number' ? parsed.index : stack.length - 1;
+      if (!Number.isFinite(index)) index = stack.length - 1;
+      if (stack.length > HISTORY_LIMIT) {
+        const overflow = stack.length - HISTORY_LIMIT;
+        stack.splice(0, overflow);
+        index = Math.max(index - overflow, 0);
+      }
+      index = Math.min(Math.max(index, 0), stack.length - 1);
+      return { stack, index };
+    } catch {
+      return null;
+    }
+  }, [getHistoryStorageKey]);
+
+  const getHistoryHtml = useCallback(() => {
+    if (!editorRef.current) return '';
+    const html = editorRef.current.innerHTML;
+    return isPlaceholderHtml(html) ? '' : html;
+  }, [isPlaceholderHtml]);
+
+  const queueHistorySnapshot = useCallback(() => {
+    if (historySnapshotTimeoutRef.current) {
+      window.clearTimeout(historySnapshotTimeoutRef.current);
+    }
+    historySnapshotTimeoutRef.current = window.setTimeout(() => {
+      historySnapshotTimeoutRef.current = null;
+      if (isApplyingHistoryRef.current || isHydratingRef.current) return;
+      const html = getHistoryHtml();
+      const history = historyStateRef.current;
+      if (history.stack.length === 0 || history.index < 0) {
+        history.stack = [html];
+        history.index = 0;
+        lastSnapshotRef.current = html;
+        persistHistoryState();
+        return;
+      }
+      if (html === lastSnapshotRef.current) return;
+      if (history.index < history.stack.length - 1) {
+        history.stack = history.stack.slice(0, history.index + 1);
+      }
+      history.stack.push(html);
+      if (history.stack.length > HISTORY_LIMIT) {
+        const overflow = history.stack.length - HISTORY_LIMIT;
+        history.stack.splice(0, overflow);
+      }
+      history.index = history.stack.length - 1;
+      lastSnapshotRef.current = html;
+      persistHistoryState();
+    }, HISTORY_SNAPSHOT_DELAY);
+  }, [getHistoryHtml, persistHistoryState]);
+  queueHistorySnapshotRef.current = queueHistorySnapshot;
+
+  const clearHistorySnapshot = useCallback(() => {
+    if (historySnapshotTimeoutRef.current) {
+      window.clearTimeout(historySnapshotTimeoutRef.current);
+      historySnapshotTimeoutRef.current = null;
+    }
+  }, []);
+
+  const applyHistorySnapshot = useCallback((targetIndex: number) => {
+    const root = editorRef.current;
+    if (!root) return;
+    const history = historyStateRef.current;
+    if (history.stack.length === 0) return;
+    const safeIndex = Math.min(Math.max(targetIndex, 0), history.stack.length - 1);
+    const html = history.stack[safeIndex] ?? '';
+    history.index = safeIndex;
+    lastSnapshotRef.current = html;
+    persistHistoryState();
+    isApplyingHistoryRef.current = true;
+    root.innerHTML = html;
+    requestAnimationFrame(() => {
+      if (!editorRef.current) {
+        isApplyingHistoryRef.current = false;
+        return;
+      }
+      hydrateSearchResultImages(editorRef.current);
+      normalizeContent();
+      rehydrateViewedSourcesToggles(editorRef.current);
+      rehydrateSourceLinks(editorRef.current);
+      rehydrateInteractiveSources(editorRef.current);
+      persistViewedSourcesForDoc(doc.id, editorRef.current);
+      rehydrateAiOutputs();
+      updateEditorEmpty();
+      isApplyingHistoryRef.current = false;
+      scheduleAutosave();
+    });
+  }, [
+    doc.id,
+    hydrateSearchResultImages,
+    normalizeContent,
+    persistHistoryState,
+    persistViewedSourcesForDoc,
+    rehydrateAiOutputs,
+    rehydrateInteractiveSources,
+    rehydrateSourceLinks,
+    rehydrateViewedSourcesToggles,
+    scheduleAutosave,
+    updateEditorEmpty,
+  ]);
+
+  const handleUndo = useCallback(() => {
+    const history = historyStateRef.current;
+    if (history.index <= 0) return;
+    clearAutosave();
+    applyHistorySnapshot(history.index - 1);
+  }, [applyHistorySnapshot, clearAutosave]);
+  handleUndoRef.current = handleUndo;
+
+  const handleRedo = useCallback(() => {
+    const history = historyStateRef.current;
+    if (history.index >= history.stack.length - 1) return;
+    clearAutosave();
+    applyHistorySnapshot(history.index + 1);
+  }, [applyHistorySnapshot, clearAutosave]);
+  handleRedoRef.current = handleRedo;
+
+  useEffect(() => {
+    if (initializedHistoryDocIdRef.current === doc.id) return;
+    initializedHistoryDocIdRef.current = doc.id;
+    clearHistorySnapshot();
+    const initialHtml = doc.content && !isPlaceholderHtml(doc.content) ? doc.content : '';
+    const stored = readHistoryState();
+    if (stored && stored.stack[stored.index] === initialHtml) {
+      historyStateRef.current = stored;
+      lastSnapshotRef.current = stored.stack[stored.index] ?? initialHtml;
+      return;
+    }
+    historyStateRef.current = { stack: [initialHtml], index: 0 };
+    lastSnapshotRef.current = initialHtml;
+    persistHistoryState();
+  }, [clearHistorySnapshot, doc.content, doc.id, isPlaceholderHtml, persistHistoryState, readHistoryState]);
+
+  useEffect(() => {
+    return () => clearHistorySnapshot();
+  }, [clearHistorySnapshot]);
+
+  useEffect(() => {
+    const root = editorRef.current;
+    if (!root) return;
+    const observer = new MutationObserver((mutations) => {
+      if (isApplyingHistoryRef.current || isHydratingRef.current) return;
+      let shouldTrack = false;
+      for (const mutation of mutations) {
+        if (mutation.type === 'characterData') {
+          if (!isUiMutationNode(mutation.target)) {
+            shouldTrack = true;
+            break;
+          }
+          continue;
+        }
+        if (mutation.type === 'childList') {
+          const nodes = [...mutation.addedNodes, ...mutation.removedNodes];
+          if (nodes.length === 0) continue;
+          if (nodes.some((node) => !isUiMutationNode(node))) {
+            shouldTrack = true;
+            break;
+          }
+        }
+      }
+      if (!shouldTrack) return;
+      scheduleEditorEmptyUpdate();
+      scheduleAutosave();
+      queueHistorySnapshot();
+    });
+    observer.observe(root, { childList: true, characterData: true, subtree: true });
+    return () => observer.disconnect();
+  }, [doc.id, isUiMutationNode, queueHistorySnapshot, scheduleAutosave, scheduleEditorEmptyUpdate]);
 
   useEffect(() => {
     return () => clearAutosave();
@@ -898,6 +1102,7 @@ export function DocumentEditor({
     clearAutosave();
     persistDocument(true);
   };
+  handleSaveRef.current = handleSave;
 
   const checkClickInSelection = (x: number, y: number): boolean => {
     const selection = window.getSelection();
@@ -1599,6 +1804,8 @@ export function DocumentEditor({
           selection.addRange(range);
           tagHumanBlock(humanSpan);
           scheduleEditorEmptyUpdate();
+          scheduleAutosave();
+          queueHistorySnapshot();
           return;
         }
       }
@@ -1618,6 +1825,8 @@ export function DocumentEditor({
         selection.addRange(range);
         tagHumanBlock(parent);
         scheduleEditorEmptyUpdate();
+        scheduleAutosave();
+        queueHistorySnapshot();
         return;
       }
     }
@@ -1637,6 +1846,8 @@ export function DocumentEditor({
           selection.addRange(range);
           tagHumanBlock(element);
           scheduleEditorEmptyUpdate();
+          scheduleAutosave();
+          queueHistorySnapshot();
           return;
         }
       }
@@ -1651,6 +1862,8 @@ export function DocumentEditor({
     selection.addRange(range);
     tagHumanBlock(span);
     scheduleEditorEmptyUpdate();
+    scheduleAutosave();
+    queueHistorySnapshot();
   };
 
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -1870,6 +2083,7 @@ export function DocumentEditor({
       selection.removeAllRanges();
       selection.addRange(newRange);
       scheduleAutosave();
+      queueHistorySnapshot();
       return;
     }
 
@@ -1886,6 +2100,7 @@ export function DocumentEditor({
     selection.addRange(range);
     scheduleEditorEmptyUpdate();
     scheduleAutosave();
+    queueHistorySnapshot();
   };
 
   const handleMarginTextPositionChange = (id: string, x: number, y: number) => {
@@ -1907,6 +2122,7 @@ export function DocumentEditor({
     setMarginTexts((prev: any[]) => prev.filter((m: any) => m.id !== id));
     editorRef.current.focus();
     scheduleAutosave();
+    queueHistorySnapshot();
   };
 
   const handleDividerMouseDown = (e: React.MouseEvent) => {
@@ -1952,34 +2168,48 @@ export function DocumentEditor({
   ];
 
   return (
-    <div className="w-full min-h-screen">
-      <div className="sticky top-0 z-[9999] bg-white border-b border-gray-200 pl-4 pr-2 py-2">
-        <div className="w-full mx-auto flex items-center justify-between text-gray-400">
-          <div className="flex items-center gap-1">
-            <span className="truncate max-w-[220px]" style={AI_TEXT_STYLE}>Monospace</span>
-            <span className="text-xs text-gray-300">/</span>
-            <span className="truncate max-w-[220px]" style={AI_TEXT_STYLE}>
-              {doc.title || 'Untitled'}
-            </span>
-          </div>
+    <div className="w-full min-h-screen relative">
+      {showHeader && (
+        <div className="sticky top-0 z-30 bg-white border-b border-gray-200 pl-4 pr-2 py-2">
+          <div className="w-full mx-auto flex items-center justify-between text-gray-400">
+            <div className="flex items-center gap-1">
+              {onHeaderHomeClick ? (
+                <button
+                  type="button"
+                  onClick={onHeaderHomeClick}
+                  className="truncate max-w-[220px] cursor-pointer hover:text-gray-600 hover:underline transition-colors"
+                  style={AI_TEXT_STYLE}
+                  aria-label="Go to Monospace home"
+                >
+                  Monospace
+                </button>
+              ) : (
+                <span className="truncate max-w-[220px]" style={AI_TEXT_STYLE}>Monospace</span>
+              )}
+              <span className="text-xs text-gray-300">/</span>
+              <span className="truncate max-w-[220px]" style={AI_TEXT_STYLE}>
+                {doc.title || 'Untitled'}
+              </span>
+            </div>
 
-          <div className="flex items-center gap-2">
-            <select
-              id="model-select"
-              value={OPENAI_MODEL_OPTIONS.includes(selectedModel) ? selectedModel : OPENAI_MODEL_OPTIONS[0]}
-              onChange={handleModelChange}
-              className="text-xs border border-gray-200 rounded pl-1 pr-5 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-              aria-label="Select AI model"
-            >
-              {OPENAI_MODEL_OPTIONS.map((modelId) => (<option key={modelId} value={modelId}>{modelId}</option>))}
-            </select>
+            <div className="flex items-center gap-2">
+              <select
+                id="model-select"
+                value={OPENAI_MODEL_OPTIONS.includes(selectedModel) ? selectedModel : OPENAI_MODEL_OPTIONS[0]}
+                onChange={handleModelChange}
+                className="text-xs border border-gray-200 rounded pl-1 pr-5 py-1 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                aria-label="Select AI model"
+              >
+                {OPENAI_MODEL_OPTIONS.map((modelId) => (<option key={modelId} value={modelId}>{modelId}</option>))}
+              </select>
 
-            <button type="button" className="p-1.5 hover:text-gray-700 transition-colors disabled:opacity-50" title="AI Review (Cmd+Enter)" disabled={aiLoading} aria-label="AI Review" onClick={handleAiReview}>
-              {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : <Sparkles className="w-4 h-4" aria-hidden />}
-            </button>
+              <button type="button" className="p-1.5 hover:text-gray-700 transition-colors disabled:opacity-50" title="AI Review (Cmd+Enter)" disabled={aiLoading} aria-label="AI Review" onClick={handleAiReview}>
+                {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : <Sparkles className="w-4 h-4" aria-hidden />}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {showShortcuts && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -2043,7 +2273,10 @@ export function DocumentEditor({
           </>
         )}
 
-        <div className="flex-1 min-w-0 overflow-auto">
+        <div
+          className="flex-1 min-w-0 overflow-auto"
+          style={{ paddingTop: scrollTopPadding, paddingBottom: scrollCenterPadding }}
+        >
           <div className="relative max-w-3xl mx-auto">
             {useOverlayPlaceholder && isEditorEmpty && hasPlaceholder && (
               <div className="pointer-events-none absolute inset-0 z-0">

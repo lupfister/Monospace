@@ -6,6 +6,8 @@ export type LocalDocument = {
   content: string;
   aiReviewedAt?: string;
   aiExcerpt?: string;
+  aiExcerptUpdatedAt?: string;
+  aiReviewAttemptedAt?: string;
 };
 
 const STORAGE_KEY = 'monospace.documents.v1';
@@ -42,7 +44,23 @@ const coerceDocument = (raw: Partial<LocalDocument> | null): LocalDocument | nul
   const updatedAt = typeof raw.updatedAt === 'string' && raw.updatedAt ? raw.updatedAt : createdAt;
   const aiReviewedAt = typeof raw.aiReviewedAt === 'string' && raw.aiReviewedAt ? raw.aiReviewedAt : undefined;
   const aiExcerpt = typeof raw.aiExcerpt === 'string' && raw.aiExcerpt.trim() ? raw.aiExcerpt.trim() : undefined;
-  return { id, title, createdAt, updatedAt, content, aiReviewedAt, aiExcerpt };
+  const aiExcerptUpdatedAt = typeof raw.aiExcerptUpdatedAt === 'string' && raw.aiExcerptUpdatedAt
+    ? raw.aiExcerptUpdatedAt
+    : undefined;
+  const aiReviewAttemptedAt = typeof raw.aiReviewAttemptedAt === 'string' && raw.aiReviewAttemptedAt
+    ? raw.aiReviewAttemptedAt
+    : undefined;
+  return {
+    id,
+    title,
+    createdAt,
+    updatedAt,
+    content,
+    aiReviewedAt,
+    aiExcerpt,
+    aiExcerptUpdatedAt,
+    aiReviewAttemptedAt,
+  };
 };
 
 export const createLocalDocument = (content: string = ''): LocalDocument => {

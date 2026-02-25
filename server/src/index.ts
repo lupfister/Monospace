@@ -8,6 +8,7 @@ import {
   handleExploreSource,
   handleFullReview,
   handleImprove,
+  handleLastUserSentence,
   handlePlanSearch,
   handleReviewSkeletonNotes,
   handleSummarize,
@@ -21,7 +22,7 @@ const PORT = Number(process.env.PORT || 4000);
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search' | 'explore_source' | 'title';
+type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'plan_search' | 'explore_source' | 'title' | 'last_user_sentence';
 
 interface AiRequestBody {
   action: AiAction;
@@ -59,6 +60,11 @@ app.post('/api/ai/action', async (req: any, res: any) => {
 
     if (action === 'expand') {
       const resultText = await handleExpand(text, model);
+      return res.json({ ok: true, text: resultText });
+    }
+
+    if (action === 'last_user_sentence') {
+      const resultText = await handleLastUserSentence(text, model);
       return res.json({ ok: true, text: resultText });
     }
 

@@ -1,7 +1,7 @@
 import { Agent, run, webSearchTool } from '@openai/agents';
 import { z } from 'zod';
 
-export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search' | 'title';
+export type AiAction = 'summarize' | 'improve' | 'expand' | 'review' | 'search' | 'title' | 'last_user_sentence';
 
 export type SearchType = 'video' | 'image' | 'web';
 
@@ -122,6 +122,15 @@ export const handleExpand = async (text: string, model?: string | null): Promise
   )}`;
   return runBasicAgent(
     'You are a writing assistant that elaborates on ideas. You only return the expanded text.',
+    prompt,
+    model,
+  );
+};
+
+export const handleLastUserSentence = async (text: string, model?: string | null): Promise<string> => {
+  const prompt = `Return the last complete sentence from the user-written text below.\n\nRules:\n- If the final thought is a fragment or list item, return that last fragment as-is.\n- Do NOT combine multiple list items or sentences.\n- Return a single line with no quotes or markdown.\n- Keep it under 160 characters when possible.\n\nText:\n${text.slice(0, 4000)}`;
+  return runBasicAgent(
+    'You extract the final user-written sentence or fragment. Return only the text, no labels.',
     prompt,
     model,
   );
@@ -389,7 +398,16 @@ ${latestUserText}`;
     if (!validated.success) {
       return { shouldSearch: false, queries: [] };
     }
-    return validated.data;
+
+    const clampedQueries = validated.data.queries.slice(0, 3);
+    if (validated.data.shouldSearch && clampedQueries.length === 0) {
+      return { shouldSearch: false, queries: [] };
+    }
+
+    return {
+      shouldSearch: validated.data.shouldSearch,
+      queries: clampedQueries,
+    };
   } catch (e) {
     console.error('[SearchPlanner] Error:', e);
     return { shouldSearch: false, queries: [] };

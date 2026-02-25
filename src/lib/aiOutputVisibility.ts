@@ -274,83 +274,76 @@ export const animateAiHide = (body: HTMLElement, onComplete?: () => void) => {
 /**
  * Animate showing AI content (reverse of hide).
  *
- * Same dual-layer approach: body height expands smoothly while
- * individual AI elements de-blur and fade in.
- * Assumes clearAiHiddenState has already been called.
+ * Deliberately avoids any opacity/transform on the body element so that
+ * highlighted text and user-written content that was already visible in
+ * collapsed mode stays in place without flickering.
+ *
+ * Instead:
+ *   1. Body height expands from collapsed → full (height-only animation).
+ *   2. Pure AI children (no highlighted content) fade + de-blur in.
+ *
+ * clearAiHiddenState is called internally so we can measure the correct
+ * start height before revealing hidden children.
  */
 export const animateAiShow = (body: HTMLElement, onComplete?: () => void) => {
   body.style.removeProperty('display');
 
-  const children = Array.from(body.children) as HTMLElement[];
+  // Clean up any lingering styles from a previous hide/reveal animation
+  clearAnimStyles(body);
 
+  // ── Measure start height while content is still hidden ────────────
+  const startHeight = body.offsetHeight;
+
+  // Reveal all hidden content so we can measure the target height
+  clearAiHiddenState(body);
+  const targetHeight = body.offsetHeight;
+
+  // ── Identify which children to fade in ────────────────────────────
+  // Skip elements that already had visible content in collapsed mode
+  // (blocks containing highlights). Those should stay put — not fade out then in.
   const toShow: HTMLElement[] = [];
-  const persistent: HTMLElement[] = [];
-  for (const child of children) {
+  for (const child of Array.from(body.children) as HTMLElement[]) {
     if (child.getAttribute('data-ai-ui') === 'true') continue;
     if (child.getAttribute('data-ai-output-toggle') === 'true') continue;
+    if (child.querySelector('[data-ai-highlighted="true"]')) continue;
     const isAi =
       child.getAttribute('data-ai-text') === 'true' ||
       child.getAttribute('data-ai-origin') === 'true' ||
       child.getAttribute('data-ai-question') === 'true';
-    if (isAi) {
-      toShow.push(child);
-    } else if (hasPersistentContent(child)) {
-      persistent.push(child);
-    }
+    if (isAi) toShow.push(child);
   }
 
-  if (toShow.length === 0) {
+  if (toShow.length === 0 && targetHeight <= startHeight) {
     onComplete?.();
     return;
   }
 
-  // ── Measure ──────────────────────────────────────────────────────
-  const startHeight = body.offsetHeight;
-  clearAiHiddenState(body);
-  const targetHeight = body.offsetHeight;
-
-  // ── Lock starting state ──────────────────────────────────────────
-  body.style.height = startHeight + 'px';
-  body.style.overflow = 'hidden';
-  body.style.willChange = 'height, transform, opacity, filter';
-  body.style.transformOrigin = 'top';
-  body.style.transform = 'scaleY(1)';
-  body.style.opacity = '1';
-  body.style.filter = 'blur(0px)';
-
-  void body.offsetHeight;                       // commit starting values
-
-  // ── Animate ──────────────────────────────────────────────────────
   const dur = AI_HIDE_DURATION;
   const ease = 'cubic-bezier(0.4, 0, 0.2, 1)';
 
+  // ── Lock body at collapsed height (height-only animation) ─────────
+  body.style.height = `${startHeight}px`;
+  body.style.overflow = 'hidden';
+  body.style.willChange = 'height';
+
+  // AI-only elements start invisible and blur in
+  prepareTextForShow(toShow);
+
+  void body.offsetHeight; // commit starting values
+
+  // ── Animate ───────────────────────────────────────────────────────
   requestAnimationFrame(() => {
-    body.style.transition = [
-      `height ${dur}ms ${ease}`,
-      `transform ${dur}ms ${ease}`,
-      `opacity ${dur}ms ${ease}`,
-      `filter ${dur}ms ${ease}`,
-    ].join(', ');
-    body.style.height = targetHeight + 'px';
-    body.style.transform = `scaleY(${BODY_SQUASH_SCALE})`;
-    body.style.opacity = '0';
-    body.style.filter = `blur(${BODY_BLUR}px)`;
+    body.style.transition = `height ${dur}ms ${ease}`;
+    body.style.height = `${targetHeight}px`;
+    if (toShow.length > 0) runTextTransition(toShow, 'in', dur);
   });
 
-  // ── Cleanup ──────────────────────────────────────────────────────
+  // ── Cleanup ───────────────────────────────────────────────────────
   setTimeout(() => {
-    requestAnimationFrame(() => {
-      clearAnimStyles(body);
-      body.style.overflow = 'visible';
-      const revealDur = Math.round(dur * 0.6);
-      prepareTextForShow(toShow);
-      animateBodyReveal(body, revealDur);
-      requestAnimationFrame(() => {
-        runTextTransition(toShow, 'in', revealDur);
-        window.setTimeout(() => clearTextAnimStyles(toShow), revealDur + 20);
-      });
-      onComplete?.();
-    });
+    clearAnimStyles(body);
+    if (toShow.length > 0) clearTextAnimStyles(toShow);
+    body.style.overflow = 'visible';
+    onComplete?.();
   }, dur + 20);
 };
 

@@ -36,6 +36,10 @@ type DocumentEditorProps = {
 const HISTORY_STORAGE_PREFIX = 'monospace.history.v1';
 const HISTORY_LIMIT = 100;
 const HISTORY_SNAPSHOT_DELAY = 300;
+const AI_HIGHLIGHT_CURSOR_SVG = '/svg/highlighter-cursor-32.svg';
+const AI_HIGHLIGHT_CURSOR_SIZE = 32;
+const AI_HIGHLIGHT_CURSOR_HOTSPOT_X = -3;
+const AI_HIGHLIGHT_CURSOR_HOTSPOT_Y = -1;
 
 const normalizeWhitespace = (value: string) =>
   value.replace(/[\u200B\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
@@ -82,6 +86,8 @@ export function DocumentEditor({
   const [isShiftSelecting, setIsShiftSelecting] = useState(false);
   const shiftSelectStart = useRef<{ x: number; y: number } | null>(null);
   const lastKnownRange = useRef<Range | null>(null);
+  const highlighterOverlayRef = useRef<HTMLImageElement>(null);
+  const isHighlighterOverlayVisibleRef = useRef(false);
 
   const [selectedModel, setSelectedModel] = useState('gpt-5-mini');
   const [isTitleGenerating, setIsTitleGenerating] = useState(false);
@@ -1128,6 +1134,43 @@ export function DocumentEditor({
     return false;
   };
 
+  const hideHighlighterOverlay = useCallback(() => {
+    const overlay = highlighterOverlayRef.current;
+    if (!overlay) return;
+    overlay.style.display = 'none';
+    isHighlighterOverlayVisibleRef.current = false;
+  }, []);
+
+  const handleHighlighterOverlayMove = useCallback((e: React.MouseEvent) => {
+    const overlay = highlighterOverlayRef.current;
+    if (!overlay) return;
+    const target = e.target as Node | null;
+    const element = target instanceof Element ? target : target?.parentElement ?? null;
+    const docWithCaret = document as Document & {
+      caretRangeFromPoint?: (x: number, y: number) => Range | null;
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node } | null;
+    };
+    const pointNode =
+      docWithCaret.caretRangeFromPoint?.(e.clientX, e.clientY)?.startContainer ??
+      docWithCaret.caretPositionFromPoint?.(e.clientX, e.clientY)?.offsetNode ??
+      target;
+    const pointElement = pointNode instanceof Element ? pointNode : pointNode?.parentElement ?? element;
+    const aiTextElement = pointElement?.closest(
+      'span[data-ai-text="true"], span[data-ai-question="true"], span[data-ai-highlighted="true"], span[role="link"][data-ai-text="true"], span[role="link"][data-ai-highlighted="true"]'
+    );
+    const isAiTextHover = Boolean(aiTextElement) && !Boolean(pointElement?.closest('[data-ai-output-toggle="true"]'));
+
+    if (!isAiTextHover) {
+      if (isHighlighterOverlayVisibleRef.current) hideHighlighterOverlay();
+      return;
+    }
+
+    overlay.style.display = 'block';
+    overlay.style.left = `${e.clientX - AI_HIGHLIGHT_CURSOR_HOTSPOT_X}px`;
+    overlay.style.top = `${e.clientY - AI_HIGHLIGHT_CURSOR_HOTSPOT_Y}px`;
+    isHighlighterOverlayVisibleRef.current = true;
+  }, [hideHighlighterOverlay]);
+
   const handleMouseDown = (e: React.MouseEvent) => {
     const selection = window.getSelection();
 
@@ -1180,6 +1223,7 @@ export function DocumentEditor({
       savedRange.current = mainRange.cloneRange();
       draggedFragment.current = combinedFragment;
       setDraggedContent(combinedText);
+      hideHighlighterOverlay();
       setIsDragging(true);
       dragStartPos.current = { x: e.clientX, y: e.clientY };
     } else if (!e.shiftKey) {
@@ -1188,6 +1232,12 @@ export function DocumentEditor({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    if (isDragging) {
+      hideHighlighterOverlay();
+    } else {
+      handleHighlighterOverlayMove(e);
+    }
+
     if (isDragging && dragStartPos.current) {
       setIsDuplicating(e.altKey);
       const dx = e.clientX - dragStartPos.current.x;
@@ -1486,6 +1536,7 @@ export function DocumentEditor({
           }
         }
       }
+      handleHighlighterOverlayMove(e);
     }
   };
 
@@ -2248,7 +2299,29 @@ export function DocumentEditor({
         ));
       })}
 
-      <div ref={containerRef} className="relative max-w-7xl mx-auto flex overflow-hidden" onMouseUp={handleMouseUp} onMouseMove={handleMouseMove}>
+      <img
+        ref={highlighterOverlayRef}
+        src={AI_HIGHLIGHT_CURSOR_SVG}
+        alt=""
+        aria-hidden
+        className="fixed pointer-events-none select-none"
+        style={{
+          width: `${AI_HIGHLIGHT_CURSOR_SIZE}px`,
+          height: `${AI_HIGHLIGHT_CURSOR_SIZE}px`,
+          left: 0,
+          top: 0,
+          zIndex: 60,
+          display: 'none',
+        }}
+      />
+
+      <div
+        ref={containerRef}
+        className="relative max-w-7xl mx-auto flex overflow-hidden"
+        onMouseUp={handleMouseUp}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={hideHighlighterOverlay}
+      >
         {marginSide === 'left' && (
           <>
             <div className="relative flex-shrink-0 overflow-hidden" style={{ width: `${marginWidth}px`, height: 'calc(100vh - 48px)' }}>

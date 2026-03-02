@@ -134,23 +134,16 @@ const getUrlDedupKey = (rawUrl: string): string => {
 const SHORT_QUESTION_SOFT_MAX = 95;
 const SHORT_QUESTION_HARD_MAX = 120;
 const SHORT_QUESTION_TARGET_WORDS = 20;
-const SHORT_QUESTION_HARD_WORDS = 24;
 const SHORT_QUESTION_MAX_SENTENCES = 2;
-const SHORT_QUESTION_MAX_WORDS_PER_SENTENCE = 14;
+const SHORT_QUESTION_RUNON_SPLIT_WORDS = 18;
 
 const toWords = (text: string): string[] => text.trim().split(/\s+/).filter(Boolean);
-
-const capWords = (text: string, maxWords: number): string => {
-  const words = toWords(text);
-  if (words.length <= maxWords) return text.trim();
-  return words.slice(0, maxWords).join(' ').trim();
-};
 
 const splitRunOnSegment = (segment: string): string[] => {
   const normalized = segment.trim();
   if (!normalized) return [];
   const words = toWords(normalized);
-  if (words.length <= SHORT_QUESTION_MAX_WORDS_PER_SENTENCE) return [normalized];
+  if (words.length <= SHORT_QUESTION_RUNON_SPLIT_WORDS) return [normalized];
 
   const markers = [' and ', ' but ', ' so ', ' because ', ' while ', ' whereas ', ', ', '; '];
   let bestCut = -1;
@@ -158,7 +151,7 @@ const splitRunOnSegment = (segment: string): string[] => {
     const idx = normalized.toLowerCase().indexOf(marker);
     if (idx <= 0) continue;
     const leftWords = toWords(normalized.slice(0, idx)).length;
-    if (leftWords >= 7 && leftWords <= 14) {
+    if (leftWords >= 7 && leftWords <= 20) {
       bestCut = idx + marker.length;
       break;
     }
@@ -171,10 +164,7 @@ const splitRunOnSegment = (segment: string): string[] => {
     if (parts.length > 1) return parts;
   }
 
-  const halfwayWords = Math.min(
-    SHORT_QUESTION_MAX_WORDS_PER_SENTENCE,
-    Math.max(8, Math.floor(words.length / 2))
-  );
+  const halfwayWords = Math.max(9, Math.floor(words.length / 2));
   return [words.slice(0, halfwayWords).join(' '), words.slice(halfwayWords).join(' ')].filter(Boolean);
 };
 
@@ -192,22 +182,21 @@ const shortenQuestionPrompt = (value: string): string => {
   for (const sentence of rawSentences) {
     const segments = splitRunOnSegment(sentence);
     for (const segment of segments) {
-      const capped = capWords(segment, SHORT_QUESTION_MAX_WORDS_PER_SENTENCE);
-      if (capped) compactSentences.push(capped);
+      const compact = normalizeWhitespace(segment);
+      if (compact) compactSentences.push(compact);
       if (compactSentences.length >= SHORT_QUESTION_MAX_SENTENCES) break;
     }
     if (compactSentences.length >= SHORT_QUESTION_MAX_SENTENCES) break;
   }
 
   if (compactSentences.length === 0) {
-    compactSentences.push(capWords(normalized, SHORT_QUESTION_TARGET_WORDS));
+    compactSentences.push(normalized);
   }
 
   let candidate = compactSentences.join(' ').trim();
-  candidate = capWords(candidate, SHORT_QUESTION_HARD_WORDS);
 
   if (toWords(candidate).length > SHORT_QUESTION_TARGET_WORDS && compactSentences.length > 1) {
-    const firstOnly = capWords(compactSentences[0], SHORT_QUESTION_TARGET_WORDS);
+    const firstOnly = compactSentences[0].trim();
     if (firstOnly) candidate = firstOnly;
   }
 
@@ -539,10 +528,10 @@ Output order (strict):
    - Ask in a low-pressure, jot-friendly way. Make it easy to answer quickly.
    - Avoid quiz/trivia framing and avoid factual recall tests.
    - Keep wording plain and natural; avoid academic jargon.
-   - Keep prompts brief and skimmable (usually ~8-18 words; target ~20 words max).
+   - Keep prompts brief and skimmable (usually ~8-18 words; target around ~20 words most of the time).
    - Avoid run-on phrasing and long multi-clause questions.
    - One longer sentence or two short sentences are both fine when concise.
-   - Aim for <= 110 chars; only exceed when needed, and keep it under ~120 chars.
+   - Aim for <= 110 chars most of the time; longer is okay when truly needed.
    - Use "input" blocks: \`lines\` must be exactly 2.
    - Vary depth by context through wording/content (not line count): shallow + concrete for short user text, deeper + synthesis for richer user text.
    - Prefer bite-sized prompts, with occasional deeper follow-up.

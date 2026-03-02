@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { fullReview, type AiError, type AgentSearchResult } from '../lib/openaiAgentApi';
+import { createReviewRequestKey } from '../lib/aiReviewRequestKey';
 import { extractDocumentContext } from '../lib/contextExtractor';
 import {
     buildSearchResultsBlock,
@@ -14,6 +15,7 @@ export type ReviewPhase = 'idle' | 'planning' | 'searching' | 'generating' | 're
 
 export function useSearchAgent(
     editorRef: React.RefObject<HTMLDivElement>,
+    docId: string,
     selectedModel: string,
     hydrateSearchResultImages: (root: HTMLElement | null) => void,
     onResultsInserted?: (outputContainer: HTMLElement) => void
@@ -23,12 +25,16 @@ export function useSearchAgent(
 
     const abortControllerRef = useRef<AbortController | null>(null);
     const shimmerRef = useRef<HTMLElement | null>(null);
+    const isRunningRef = useRef(false);
+    const activeRequestIdRef = useRef(0);
 
     /**
      * Cancels any in-progress AI review.
      * Removes the shimmer from the document and resets state.
      */
     const cancelReview = useCallback(() => {
+        activeRequestIdRef.current += 1;
+        isRunningRef.current = false;
         if (abortControllerRef.current) {
             abortControllerRef.current.abort();
             abortControllerRef.current = null;
@@ -46,10 +52,10 @@ export function useSearchAgent(
      * Inserts a shimmer loading indicator and calls the batched API endpoint.
      */
     const handleAiReview = useCallback(async () => {
-        if (!editorRef.current || phase !== 'idle') return;
-
-        // Cancel any existing request
-        cancelReview();
+        if (!editorRef.current || isRunningRef.current) return;
+        isRunningRef.current = true;
+        const requestId = activeRequestIdRef.current + 1;
+        activeRequestIdRef.current = requestId;
 
         setError(null);
 
@@ -101,12 +107,21 @@ export function useSearchAgent(
 
             // Make the unified API call with context
             const context = extractDocumentContext(editorRef.current);
+            const requestKey = createReviewRequestKey({
+                docId,
+                text: trimmedText,
+                model: selectedModel,
+                context,
+                mode: 'manual',
+            });
             const result = await fullReview(
                 trimmedText,
                 selectedModel,
                 abortControllerRef.current.signal,
-                context
+                context,
+                requestKey
             );
+            if (activeRequestIdRef.current !== requestId) return;
 
             if (!result.ok) {
                 // Remove shimmer, set error
@@ -130,9 +145,16 @@ export function useSearchAgent(
             if (searchResults.length > 0 || (narrative && narrative.blocks.length > 0)) {
                 const resultItems = orderedSearchResultsToItems(searchResults as AgentSearchResult[]);
                 const resultsBlock = await buildSearchResultsBlock(resultItems, narrative);
+                if (activeRequestIdRef.current !== requestId) return;
 
                 // Replace shimmer with results
-                shimmer.replaceWith(resultsBlock);
+                if (shimmer.isConnected && shimmer.parentNode) {
+                    shimmer.replaceWith(resultsBlock);
+                } else if (editorRef.current) {
+                    editorRef.current.appendChild(resultsBlock);
+                } else {
+                    return;
+                }
                 shimmerRef.current = null;
 
                 hydrateSearchResultImages(editorRef.current);
@@ -168,8 +190,11 @@ export function useSearchAgent(
         } finally {
             setPhase('idle');
             abortControllerRef.current = null;
+            if (activeRequestIdRef.current === requestId) {
+                isRunningRef.current = false;
+            }
         }
-    }, [editorRef, selectedModel, hydrateSearchResultImages, phase, cancelReview]);
+    }, [editorRef, docId, selectedModel, hydrateSearchResultImages, cancelReview, onResultsInserted]);
 
     return {
         handleAiReview,

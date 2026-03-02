@@ -18,6 +18,10 @@ const AI_NODE_SELECTOR =
 const PRIMARY_BLOCK_TAGS = new Set(['P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE']);
 
 const normalizeWhitespace = (value: string) => value.replace(/\s+/g, ' ').trim();
+const deriveTitleFromContent = (content: string) => {
+  const text = normalizeWhitespace(content.replace(/<[^>]*>/g, ' '));
+  return text ? text.slice(0, 64) : 'Untitled';
+};
 
 const stripAiNodesPreserveHuman = (root: HTMLElement) => {
   const aiElements = Array.from(root.querySelectorAll<HTMLElement>(AI_NODE_SELECTOR));
@@ -229,6 +233,7 @@ export default function App() {
     if (!initialDocIdRef.current || activeDocId !== null) return;
     const matched = documents.find((doc) => doc.id === initialDocIdRef.current);
     if (matched) {
+      initialDocIdRef.current = null;
       setActiveDocId(matched.id);
       return;
     }
@@ -272,6 +277,14 @@ export default function App() {
     regular: LocalDocument[];
   }>({ prioritized: [], regular: [] });
 
+  const clearDocQueryParam = useCallback(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has('doc')) return;
+    params.delete('doc');
+    const nextUrl = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
+    window.history.replaceState(null, '', nextUrl);
+  }, []);
+
   useEffect(() => {
     if (!isTransitioning) {
       setRevisitSnapshot({ prioritized: prioritizedDocuments, regular: regularDocuments });
@@ -279,9 +292,12 @@ export default function App() {
   }, [isTransitioning, prioritizedDocuments, regularDocuments]);
 
   const handleHeaderHomeClick = useCallback(() => {
+    initialDocIdRef.current = null;
+    clearDocQueryParam();
     setActiveDocId(null);
+    setDisableRevisitAnimation(false);
     requestHomeReviewCheck();
-  }, [requestHomeReviewCheck]);
+  }, [clearDocQueryParam, requestHomeReviewCheck]);
 
   const handleOpenRevisitDoc = useCallback((docId: string) => {
     setDisableRevisitAnimation(true);
@@ -289,14 +305,17 @@ export default function App() {
   }, []);
 
   const handleFirstInput = useCallback(
-    (_content: string) => {
+    (content: string) => {
       if (activeDocId !== null) return;
       if (draftInsertedRef.current) return;
       setRevisitSnapshot({ prioritized: prioritizedDocuments, regular: regularDocuments });
       draftInsertedRef.current = true;
       const now = new Date().toISOString();
+      const initialContent = content || '';
       const nextDraft = {
         ...draftDocument,
+        content: initialContent,
+        title: initialContent ? deriveTitleFromContent(initialContent) : draftDocument.title,
         updatedAt: now,
       };
       setDraftDocument(nextDraft);

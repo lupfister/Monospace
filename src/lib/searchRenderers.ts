@@ -771,6 +771,15 @@ const createParagraphSpace = () => {
     return el;
 };
 
+const getHostnameSafe = (rawUrl?: string): string => {
+    if (!rawUrl) return '';
+    try {
+        return new URL(rawUrl).hostname;
+    } catch {
+        return '';
+    }
+};
+
 export const buildSearchResultsBlock = async (
     items: ResultItem[],
     notes?: SkeletonNotes
@@ -890,117 +899,182 @@ export const buildSearchResultsBlock = async (
     }
 
     // 2. Excerpt Section (Quotes)
-    // Find the 1-3 "best" excerpts from ARTICLES only
-    const meaningfulSnippets = searchableItems.filter((i) => {
-        if (i.type !== 'article') return false; // STRICT: Only articles
-        if (!i.snippet) return false;
-        const s = i.snippet.trim();
-        const len = s.length;
+    type ExcerptCandidate = ResultItem & {
+        cleanedSnippet: string;
+        domain: string;
+        tokenSet: Set<string>;
+        score: number;
+    };
 
-        // STRICT: Filter out AI-generated summaries - must be direct source text
-        // Reject snippets that start with summary phrases
-        const aiSummaryPatterns = [
-            /^(this|the|a|an) (video|article|page|paper|study|site|website|research|report|post|entry|piece|chapter|book|guide|tutorial|blog|review|analysis|document|source|resource|content|section|text|work|publication|journal)/i,
-            /^video exploring/i,
-            /^(this|it) (covers?|discusses?|explains?|describes?|explores?|examines?|analyzes?|reviews?|presents?|shows?|demonstrates?|provides?|offers?|outlines?|details?|focuses?)/i,
-            /^(the author|authors?|researcher|researchers?|writer|study|research|article|paper) (cover|discuss|explain|describe|explore|examine|analyze|review|present|show|demonstrate|provide|offer|outline|detail|focus)/i,
-            /^(here|in this|according to)/i,
-            /^(an? )?(overview|summary|introduction|explanation|description|analysis) (of|to)/i
-        ];
-
-        for (const pattern of aiSummaryPatterns) {
-            if (pattern.test(s)) return false;
-        }
-
-        return len >= 40 && len <= 400;
-    });
-
-    const sortedSnippets = meaningfulSnippets.sort((a, b) => {
-        const aHasQuote = a.snippet!.includes('"') || a.snippet!.includes('“');
-        const bHasQuote = b.snippet!.includes('"') || b.snippet!.includes('“');
-        if (aHasQuote && !bHasQuote) return -1;
-        if (!aHasQuote && bHasQuote) return 1;
-        return b.snippet!.length - a.snippet!.length; // Longest first
-    });
-
-    // Take top 3 excerpts (initial candidate list)
-    // We want to default to just 1, but allow a 2nd if it's really good and distinct.
-    const candidates = sortedSnippets.slice(0, 3);
-    const topExcerpts: typeof candidates = [];
-
-    if (candidates.length > 0) {
-        // ALWAYS take the best one
-        topExcerpts.push(candidates[0]);
-
-        // MAYBE take a second one if it's distinct and substantial
-        if (candidates.length > 1) {
-            const first = candidates[0];
-            const second = candidates[1];
-
-            const firstDomain = first.url ? new URL(first.url).hostname : 'a';
-            const secondDomain = second.url ? new URL(second.url).hostname : 'b';
-
-            // Conditions for adding a second excerpt:
-            // 1. Must be from a different domain (avoid redundancy)
-            // 2. Must be substantial (> 80 chars)
-            if (firstDomain !== secondDomain && (second.snippet?.length || 0) > 80) {
-                topExcerpts.push(second);
-            }
-        }
-    }
+    const excerptSummaryPatterns = [
+        /^(this|the|a|an)\s+(video|article|page|paper|study|site|website|research|report|post|entry|piece|chapter|book|guide|tutorial|blog|review|analysis|document|source|resource|content|section|text|work|publication|journal)\b/i,
+        /^(this|it)\s+(covers?|discusses?|explains?|describes?|explores?|examines?|analyzes?|reviews?|presents?|shows?|demonstrates?|provides?|offers?|outlines?|details?|focuses?)\b/i,
+        /^(the\s+author|authors?|researcher|researchers?|writer|study|research|article|paper)\s+(cover|discuss|explain|describe|explore|examine|analyze|review|present|show|demonstrate|provide|offer|outline|detail|focus)\b/i,
+        /^(here|in this|according to)\b/i,
+        /^(an?\s+)?(overview|summary|introduction|explanation|description|analysis)\s+(of|to)\b/i,
+    ];
 
     const cleanSnippet = (text: string): string => {
-        // Remove trailing markdown links: [label](url) or ([label](url))
-        let cleaned = text.replace(/\s*\(?\[[^\]]*\]\([^)]+\)\)?\.?$/g, '');
-        // Remove trailing raw URLs
+        let cleaned = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
         cleaned = cleaned.replace(/\s*\(?https?:\/\/[^\s)]+\)?\.?$/g, '');
-        // Remove trailing domain names in parentheses like (en.wikipedia.org)
         cleaned = cleaned.replace(/\s*\([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\)\.?$/g, '');
-        // Remove "Source: ..." or "Via: ..." at the end
         cleaned = cleaned.replace(/\s*(?:Source|Via):.*$/i, '');
-        // Remove wrapping quotes (straight or curly) if present
-        cleaned = cleaned.trim();
-        cleaned = cleaned.replace(/^["“”]+/, '').replace(/["“”]+$/, '');
+        cleaned = cleaned.replace(/\s+/g, ' ').trim();
+        cleaned = cleaned.replace(/^["“”'`]+/, '').replace(/["“”'`]+$/, '');
         return cleaned.trim();
     };
 
-    if (topExcerpts.length > 0) {
-        topExcerpts.forEach((excerptItem) => {
-            // Render excerpt as plain italic text, cleaned of citations
-            const rawSnippet = excerptItem.snippet || '';
-            const cleanedSnippet = cleanSnippet(rawSnippet);
-            const excerptText = cleanedSnippet;
+    const excerptTokens = (text: string): Set<string> => {
+        const tokens = text
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .split(/\s+/)
+            .filter((token) => token.length >= 4);
+        return new Set(tokens);
+    };
 
+    const excerptSimilarity = (a: Set<string>, b: Set<string>): number => {
+        if (a.size === 0 || b.size === 0) return 0;
+        let overlap = 0;
+        a.forEach((token) => {
+            if (b.has(token)) overlap += 1;
+        });
+        const denominator = Math.max(a.size, b.size);
+        return denominator ? overlap / denominator : 0;
+    };
 
+    const excerptScore = (snippet: string): number => {
+        const len = snippet.length;
+        const quoteBonus = /["“”]/.test(snippet) ? 18 : 0;
+        const numericBonus = /\b\d{2,4}\b/.test(snippet) ? 10 : 0;
+        const concreteBonus = /%|°|km|kg|ms|GHz|USD|\$/.test(snippet) ? 8 : 0;
+        const sentenceBonus = /[.!?]/.test(snippet) ? 6 : 0;
+        const idealLengthPenalty = Math.abs(160 - len) * 0.12;
+        return quoteBonus + numericBonus + concreteBonus + sentenceBonus + Math.max(0, 28 - idealLengthPenalty);
+    };
+
+    const excerptCandidates: ExcerptCandidate[] = searchableItems
+        .filter((item): item is ResultItem & { type: 'article'; snippet: string } => item.type === 'article' && typeof item.snippet === 'string')
+        .map((item) => {
+            const cleanedSnippet = cleanSnippet(item.snippet);
+            return {
+                ...item,
+                cleanedSnippet,
+                domain: getHostnameSafe(item.url),
+                tokenSet: excerptTokens(cleanedSnippet),
+                score: excerptScore(cleanedSnippet),
+            };
+        })
+        .filter((item) => {
+            const len = item.cleanedSnippet.length;
+            if (len < 45 || len > 380) return false;
+            if (excerptSummaryPatterns.some((pattern) => pattern.test(item.cleanedSnippet))) return false;
+            return true;
+        })
+        .sort((a, b) => b.score - a.score);
+
+    const topExcerpts: ExcerptCandidate[] = [];
+    for (const candidate of excerptCandidates) {
+        if (topExcerpts.length >= 3) break;
+        if (topExcerpts.length === 0) {
+            topExcerpts.push(candidate);
+            continue;
+        }
+
+        const hasHighOverlap = topExcerpts.some((selected) => excerptSimilarity(candidate.tokenSet, selected.tokenSet) > 0.7);
+        if (hasHighOverlap) continue;
+
+        const firstScore = topExcerpts[0].score;
+        const minScoreRatio = topExcerpts.length === 1 ? 0.68 : 0.78;
+        const minLength = topExcerpts.length === 1 ? 70 : 90;
+        const hasDistinctDomain = topExcerpts.every((selected) => !candidate.domain || !selected.domain || selected.domain !== candidate.domain);
+
+        if (candidate.score < firstScore * minScoreRatio) continue;
+        if (candidate.cleanedSnippet.length < minLength) continue;
+        if (topExcerpts.length >= 2 && !hasDistinctDomain) continue;
+
+        topExcerpts.push(candidate);
+    }
+
+    if (topExcerpts.length === 0) {
+        const relaxedCandidates: ExcerptCandidate[] = searchableItems
+            .filter((item): item is ResultItem & { type: 'article'; snippet: string } => item.type === 'article' && typeof item.snippet === 'string')
+            .map((item) => {
+                const cleanedSnippet = cleanSnippet(item.snippet);
+                return {
+                    ...item,
+                    cleanedSnippet,
+                    domain: getHostnameSafe(item.url),
+                    tokenSet: excerptTokens(cleanedSnippet),
+                    score: excerptScore(cleanedSnippet),
+                };
+            })
+            .filter((item) => item.cleanedSnippet.length >= 25)
+            .sort((a, b) => b.score - a.score);
+
+        if (relaxedCandidates.length > 0) {
+            topExcerpts.push(relaxedCandidates[0]);
+        }
+    }
+
+    const excerptRenderItems: Array<{
+        url?: string;
+        title: string;
+        excerptText: string;
+        contextSnippet: string;
+    }> = topExcerpts.map((item) => ({
+        url: item.url,
+        title: item.title || 'Open source',
+        excerptText: item.cleanedSnippet,
+        contextSnippet: item.cleanedSnippet,
+    }));
+
+    if (excerptRenderItems.length === 0 && infoItems.length > 0) {
+        const fallback = infoItems[0];
+        const fallbackText = (() => {
+            if (typeof fallback.snippet === 'string' && fallback.snippet.trim()) {
+                const cleaned = cleanSnippet(fallback.snippet);
+                if (cleaned) return cleaned;
+            }
+            return `Source focus: ${fallback.title || getHostnameSafe(fallback.url) || 'Key reference'}`;
+        })();
+        excerptRenderItems.push({
+            url: fallback.url,
+            title: fallback.title || 'Open source',
+            excerptText: fallbackText,
+            contextSnippet: fallbackText,
+        });
+    }
+
+    if (excerptRenderItems.length > 0) {
+        excerptRenderItems.forEach((excerptItem) => {
             const excerptP = document.createElement('p');
             excerptP.dataset.aiText = 'true';
             excerptP.dataset.aiOrigin = 'true';
             excerptP.style.lineHeight = '1.5';
             excerptP.style.margin = '0';
 
-            const excerptSpan = createAiTextSpan(excerptText);
+            const excerptSpan = createAiTextSpan(excerptItem.excerptText);
             excerptSpan.style.fontStyle = 'italic';
             excerptP.appendChild(excerptSpan);
 
             fragment.appendChild(excerptP);
 
-            // Single source link below the excerpt
             if (excerptItem.url) {
-                const linkWrapper = document.createElement('div'); // Changed p to div to avoid nesting issues
+                const linkWrapper = document.createElement('div');
                 linkWrapper.dataset.aiText = 'true';
                 linkWrapper.dataset.aiOrigin = 'true';
                 linkWrapper.style.lineHeight = '1.5';
                 linkWrapper.style.margin = '0';
 
-                // Use the interactive source item
                 linkWrapper.appendChild(createInteractiveSourceItem(
                     excerptItem.url,
-                    excerptItem.title || 'Open source',
-                    excerptItem.snippet || '' // Pass snippet as context
+                    excerptItem.title,
+                    excerptItem.contextSnippet
                 ));
 
                 fragment.appendChild(linkWrapper);
-                fragment.appendChild(createSpacer()); // Spacer after each quote block
+                fragment.appendChild(createSpacer());
             } else {
                 fragment.appendChild(createSpacer());
             }
@@ -1024,9 +1098,10 @@ export const buildSearchResultsBlock = async (
                 promptP.appendChild(createAiTextSpan(block.prompt));
                 fragment.appendChild(promptP);
 
-                // User lines - Always 2 gaps
-                fragment.appendChild(createParagraphSpace());
-                fragment.appendChild(createParagraphSpace());
+                const lineCount = 2;
+                for (let i = 0; i < lineCount; i += 1) {
+                    fragment.appendChild(createParagraphSpace());
+                }
             }
         });
     }

@@ -6,6 +6,7 @@ import {
   handleAgentSearch,
   handleExpand,
   handleExploreSource,
+  type FullReviewResult,
   handleFullReview,
   handleImprove,
   handleLastUserSentence,
@@ -18,6 +19,39 @@ import {
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
+
+const REVIEW_REQUEST_CACHE_TTL_MS = 10 * 60 * 1000;
+const REVIEW_REQUEST_PENDING_TTL_MS = 2 * 60 * 1000;
+
+type ReviewRequestCacheEntry =
+  | {
+    status: 'pending';
+    startedAt: number;
+    promise: Promise<FullReviewResult>;
+  }
+  | {
+    status: 'fulfilled';
+    startedAt: number;
+    completedAt: number;
+    result: FullReviewResult;
+  };
+
+const reviewRequestCache = new Map<string, ReviewRequestCacheEntry>();
+
+const pruneReviewRequestCache = () => {
+  const now = Date.now();
+  for (const [key, entry] of reviewRequestCache.entries()) {
+    if (entry.status === 'pending') {
+      if (now - entry.startedAt > REVIEW_REQUEST_PENDING_TTL_MS) {
+        reviewRequestCache.delete(key);
+      }
+      continue;
+    }
+    if (now - entry.completedAt > REVIEW_REQUEST_CACHE_TTL_MS) {
+      reviewRequestCache.delete(key);
+    }
+  }
+};
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
@@ -124,8 +158,13 @@ function classifyError(error: unknown): string {
 
 // Unified review endpoint - batches planning, search, and narrative into one call
 app.post('/api/ai/review', async (req: any, res: any) => {
-  const { text, model, context } = req.body || {};
-  console.log(`[API] /review request: text len: ${text?.length}, model: ${model}, context len: ${context?.length}`);
+  const { text, model, context, requestKey } = req.body || {};
+  const normalizedRequestKey = typeof requestKey === 'string' && requestKey.trim()
+    ? requestKey.trim().slice(0, 256)
+    : undefined;
+  console.log(
+    `[API] /review request: text len: ${text?.length}, model: ${model}, context len: ${context?.length}, key: ${normalizedRequestKey ?? 'none'}`
+  );
 
   if (!text || typeof text !== 'string') {
     return res.status(400).json({
@@ -135,9 +174,45 @@ app.post('/api/ai/review', async (req: any, res: any) => {
   }
 
   try {
-    const result = await handleFullReview(text, model, context);
+    pruneReviewRequestCache();
+
+    if (normalizedRequestKey) {
+      const existing = reviewRequestCache.get(normalizedRequestKey);
+      if (existing) {
+        if (existing.status === 'fulfilled') {
+          return res.json({ ok: true, ...existing.result });
+        }
+
+        const pendingResult = await existing.promise;
+        return res.json({ ok: true, ...pendingResult });
+      }
+    }
+
+    const startedAt = Date.now();
+    const runPromise = handleFullReview(text, model, context);
+    if (normalizedRequestKey) {
+      reviewRequestCache.set(normalizedRequestKey, {
+        status: 'pending',
+        startedAt,
+        promise: runPromise,
+      });
+    }
+
+    const result = await runPromise;
+    if (normalizedRequestKey) {
+      reviewRequestCache.set(normalizedRequestKey, {
+        status: 'fulfilled',
+        startedAt,
+        completedAt: Date.now(),
+        result,
+      });
+    }
+
     return res.json({ ok: true, ...result });
   } catch (error) {
+    if (normalizedRequestKey) {
+      reviewRequestCache.delete(normalizedRequestKey);
+    }
     const message = error instanceof Error ? error.message : String(error);
     const errorType = classifyError(error);
     console.error('[/api/ai/review] Error:', errorType, message);

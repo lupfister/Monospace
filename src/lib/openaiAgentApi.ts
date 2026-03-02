@@ -227,13 +227,15 @@ export const planSearch = async (
       normalizedQueries.push({ type, query, reason });
     }
 
-    if (plan.shouldSearch && normalizedQueries.length === 0) {
+    const clampedQueries = normalizedQueries.slice(0, 1);
+
+    if (plan.shouldSearch && clampedQueries.length === 0) {
       return { shouldSearch: false, queries: [] };
     }
 
     return {
       shouldSearch: plan.shouldSearch,
-      queries: normalizedQueries,
+      queries: clampedQueries,
     };
   } catch {
     return { shouldSearch: false, queries: [] };
@@ -308,7 +310,8 @@ export const fullReview = async (
   text: string,
   model?: string | null,
   signal?: AbortSignal,
-  context?: ContextBlock[]
+  context?: ContextBlock[],
+  requestKey?: string
 ): Promise<{ ok: true; data: FullReviewResult } | { ok: false; error: AiError }> => {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -322,7 +325,12 @@ export const fullReview = async (
     const res = await fetch('/api/ai/review', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: trimmed, model: model ?? undefined, context }),
+      body: JSON.stringify({
+        text: trimmed,
+        model: model ?? undefined,
+        context,
+        requestKey: requestKey?.trim() || undefined,
+      }),
       signal,
     });
 

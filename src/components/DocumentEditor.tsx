@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { MoveHorizontal, Sparkles, Loader2 } from 'lucide-react';
-import { AI_TEXT_STYLE, createHumanTextSpan, isHumanTextSpan, createStyledSourceLink, isAiTextSpan, rehydrateSourceLinks } from '../lib/textStyles';
-import { isProbablyUrl } from '../lib/linkPreviews';
+import { AI_TEXT_STYLE, createHumanTextSpan, isHumanTextSpan, isAiTextSpan, rehydrateSourceLinks } from '../lib/textStyles';
 import { applyAiHiddenState, clearAiHiddenState, animateAiHide, animateAiShow } from '../lib/aiOutputVisibility';
 import { formatAiOutputLabel } from '../lib/aiOutputLabel';
 
@@ -447,6 +446,7 @@ export function DocumentEditor({
 
   const { handleAiReview, cancelReview, isLoading, aiLoading, aiError, isSearching, setAiError } = useSearchAgent(
     editorRef,
+    doc.id,
     selectedModel,
     hydrateSearchResultImages,
     handleAiOutputInserted
@@ -900,6 +900,13 @@ export function DocumentEditor({
   }, [persistDocument]);
   scheduleAutosaveRef.current = scheduleAutosave;
 
+  const flushPendingAutosave = useCallback(() => {
+    if (!autosaveTimeoutRef.current) return;
+    window.clearTimeout(autosaveTimeoutRef.current);
+    autosaveTimeoutRef.current = null;
+    persistDocument(false);
+  }, [persistDocument]);
+
   const getHistoryStorageKey = useCallback(() => `${HISTORY_STORAGE_PREFIX}.${doc.id}`, [doc.id]);
 
   const persistHistoryState = useCallback((state: { stack: string[]; index: number } = historyStateRef.current) => {
@@ -1091,8 +1098,8 @@ export function DocumentEditor({
   }, [doc.id, isUiMutationNode, queueHistorySnapshot, scheduleAutosave, scheduleEditorEmptyUpdate]);
 
   useEffect(() => {
-    return () => clearAutosave();
-  }, []);
+    return () => flushPendingAutosave();
+  }, [flushPendingAutosave]);
 
   useEffect(() => {
     clearAutosave();
@@ -1457,13 +1464,13 @@ export function DocumentEditor({
                 const span = document.createElement('span');
                 span.setAttribute('data-ai-highlighted', 'true');
                 span.setAttribute('data-ai-highlighted-at', String(Date.now()));
+                span.setAttribute('data-ai-highlight-variant', String(Math.floor(Math.random() * 4)));
 
                 const style = window.getComputedStyle(cp);
                 span.style.fontFamily = style.fontFamily;
                 span.style.fontSize = style.fontSize;
                 span.style.color = style.color;
                 span.style.lineHeight = style.lineHeight;
-                span.style.display = 'inline';
                 target.parentNode?.insertBefore(span, target);
                 span.appendChild(target);
               } else {
@@ -1475,7 +1482,6 @@ export function DocumentEditor({
                 }
               }
             });
-            selection.removeAllRanges();
             normalizeAiHighlightSpans(editorRef.current);
           }
         }
@@ -1612,8 +1618,17 @@ export function DocumentEditor({
     const highlightSelector = 'span[data-ai-highlighted="true"]';
     const parents = new Set<HTMLElement>();
 
-    root.querySelectorAll(highlightSelector).forEach((el) => {
-      const parent = (el as HTMLElement).parentElement;
+    Array.from(root.querySelectorAll(highlightSelector)).forEach((el, index) => {
+      const highlightEl = el as HTMLElement;
+      if (!(highlightEl.textContent || '').trim()) {
+        highlightEl.remove();
+        return;
+      }
+      highlightEl.style.removeProperty('display');
+      if (!highlightEl.hasAttribute('data-ai-highlight-variant')) {
+        highlightEl.setAttribute('data-ai-highlight-variant', String(index % 4));
+      }
+      const parent = highlightEl.parentElement;
       if (parent) parents.add(parent);
     });
 
@@ -1861,9 +1876,7 @@ export function DocumentEditor({
     selection.removeAllRanges();
     selection.addRange(range);
     tagHumanBlock(span);
-    scheduleEditorEmptyUpdate();
-    scheduleAutosave();
-    queueHistorySnapshot();
+    handleEditorInput();
   };
 
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -2044,6 +2057,8 @@ export function DocumentEditor({
       range.selectNodeContents(editorRef.current);
       range.collapse(false);
     }
+    selection.removeAllRanges();
+    selection.addRange(range);
 
 
     claimAiContent(range.commonAncestorContainer);
@@ -2069,35 +2084,21 @@ export function DocumentEditor({
       range.deleteContents();
     }
 
-    const trimmed = pastedText.trim();
-    if (isProbablyUrl(trimmed)) {
-      const linkPill = createStyledSourceLink(trimmed, trimmed);
-      // Ensure vertical alignment and spacing
-      linkPill.style.marginLeft = '4px';
-      linkPill.style.marginRight = '4px';
-      range.insertNode(linkPill);
+    const insertParagraphBreak = () => {
+      document.execCommand('insertParagraph');
+      const currentSelection = window.getSelection();
+      if (!currentSelection || currentSelection.rangeCount === 0) return;
+      const currentRange = currentSelection.getRangeAt(0);
+      const block = getClosestBlock(currentRange.startContainer);
+      if (block) block.setAttribute('data-human-block', 'true');
+    };
 
-      const newRange = document.createRange();
-      newRange.setStartAfter(linkPill);
-      newRange.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(newRange);
-      scheduleAutosave();
-      queueHistorySnapshot();
-      return;
-    }
-
-    const span = createHumanTextSpan('', '1');
-    const lines = pastedText.split('\n');
+    const lines = pastedText.replace(/\r\n?/g, '\n').split('\n');
     lines.forEach((line: string, index: number) => {
-      if (index > 0) span.appendChild(document.createElement('br'));
-      if (line) span.appendChild(document.createTextNode(line));
+      if (line) insertStyledText(line);
+      if (index < lines.length - 1) insertParagraphBreak();
     });
-    range.insertNode(span);
-    range.setStartAfter(span);
-    range.collapse(true);
-    selection.removeAllRanges();
-    selection.addRange(range);
+
     scheduleEditorEmptyUpdate();
     scheduleAutosave();
     queueHistorySnapshot();
@@ -2360,11 +2361,98 @@ export function DocumentEditor({
       <style dangerouslySetInnerHTML={{
         __html: `
           [data-ai-highlighted="true"] {
-            background-color: #fff7a5;
             color: #000;
-            padding: 1px 0;
+            position: relative;
+            z-index: 0;
+            padding: 0;
             border-radius: 2px;
-            transition: background-color 0.2s ease;
+            transition: filter 0.2s ease;
+          }
+
+          [data-ai-highlighted="true"]::before {
+            content: '';
+            position: absolute;
+            left: -0.05em;
+            right: -0.05em;
+            top: -0.34em;
+            bottom: -0.08em;
+            z-index: -1;
+            pointer-events: none;
+            background: linear-gradient(180deg, #fff8ab 0%, #fff29a 100%);
+            border-radius: 24% 28% 22% 26% / 17% 15% 19% 16%;
+            transform: rotate(-0.08deg);
+            clip-path: polygon(
+              0% 18%,
+              18% 15%,
+              38% 17%,
+              60% 14%,
+              82% 16%,
+              100% 18%,
+              100% 84%,
+              82% 87%,
+              60% 85%,
+              38% 88%,
+              18% 86%,
+              0% 84%
+            );
+          }
+
+          [data-ai-highlighted="true"][data-ai-highlight-variant="1"]::before {
+            transform: rotate(0.12deg);
+            clip-path: polygon(
+              0% 17%,
+              20% 14%,
+              42% 16%,
+              64% 13%,
+              84% 15%,
+              100% 17%,
+              100% 85%,
+              82% 88%,
+              62% 86%,
+              40% 89%,
+              20% 87%,
+              0% 85%
+            );
+          }
+
+          [data-ai-highlighted="true"]:empty::before {
+            content: none;
+          }
+
+          [data-ai-highlighted="true"][data-ai-highlight-variant="2"]::before {
+            transform: rotate(-0.14deg);
+            clip-path: polygon(
+              0% 19%,
+              16% 16%,
+              36% 18%,
+              58% 15%,
+              80% 17%,
+              100% 19%,
+              100% 83%,
+              84% 86%,
+              62% 84%,
+              40% 87%,
+              18% 85%,
+              0% 83%
+            );
+          }
+
+          [data-ai-highlighted="true"][data-ai-highlight-variant="3"]::before {
+            transform: rotate(0.06deg);
+            clip-path: polygon(
+              0% 18%,
+              22% 15%,
+              44% 17%,
+              66% 14%,
+              86% 16%,
+              100% 18%,
+              100% 84%,
+              86% 87%,
+              64% 85%,
+              42% 88%,
+              22% 86%,
+              0% 84%
+            );
           }
         `
       }} />
@@ -2396,14 +2484,12 @@ export function DocumentEditor({
 
           [data-ai-show-highlight="true"] [data-ai-highlighted="true"] {
             visibility: visible;
-            display: inline-block;
+            display: block !important;
+            width: fit-content;
             max-width: 100%;
-          }
-
-          [data-ai-show-highlight="true"] [data-ai-highlighted="true"]::after {
-            content: '';
-            display: block;
-            height: 0.75rem;
+            margin: 0 0 0.28rem 0;
+            white-space: normal;
+            overflow: visible;
           }
 
           [data-ai-show-highlight="true"] [data-human-text="true"] {
@@ -2412,14 +2498,12 @@ export function DocumentEditor({
           }
 
           [data-ai-output="true"][data-ai-output-collapsed="true"] [data-ai-output-body="true"] [data-ai-highlighted="true"] {
-            display: inline-block;
+            display: block !important;
+            width: fit-content;
             max-width: 100%;
-          }
-
-          [data-ai-output="true"][data-ai-output-collapsed="true"] [data-ai-output-body="true"] [data-ai-highlighted="true"]::after {
-            content: '';
-            display: block;
-            height: 0.75rem;
+            margin: 0 0 0.28rem 0;
+            white-space: normal;
+            overflow: visible;
           }
 
           [data-ai-output="true"][data-ai-output-collapsed="true"] [data-ai-output-body="true"] [data-human-text="true"] {

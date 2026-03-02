@@ -27,6 +27,234 @@ const SEARCH_PLAN_SCHEMA = z.object({
     .max(10),
 });
 
+const QUERY_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'how', 'if', 'in', 'into', 'is', 'it', 'its',
+  'of', 'on', 'or', 'that', 'the', 'their', 'them', 'there', 'these', 'this', 'to', 'was', 'we', 'what', 'when',
+  'where', 'which', 'who', 'why', 'with', 'you', 'your',
+]);
+
+const SUMMARY_STYLE_SNIPPET_PATTERNS = [
+  /^(this|the|a|an)\s+(video|article|page|paper|study|site|website|research|report|post|piece|guide|blog|analysis)\b/i,
+  /^(this|it)\s+(covers?|discusses?|explains?|describes?|explores?|examines?|analyzes?|reviews?|presents?|shows?|demonstrates?|provides?|offers?|outlines?|details?|focuses?)\b/i,
+  /^(the\s+author|authors?|researcher|researchers?|writer|study|research|article|paper)\s+(cover|discuss|explain|describe|explore|examine|analyze|review|present|show|demonstrate|provide|offer|outline|detail|focus)\b/i,
+  /^(here|in this|according to)\b/i,
+  /^(an?\s+)?(overview|summary|introduction|explanation|description|analysis)\s+(of|to)\b/i,
+];
+
+const normalizeWhitespace = (value: string): string => value.replace(/\s+/g, ' ').trim();
+
+const cleanSearchSnippet = (value: string): string => {
+  let cleaned = value;
+  cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  cleaned = cleaned.replace(/https?:\/\/[^\s)]+/g, '');
+  cleaned = cleaned.replace(/\s*\(?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\)?\.?$/g, '');
+  cleaned = cleaned.replace(/\s*(?:Source|Via):.*$/i, '');
+  cleaned = normalizeWhitespace(cleaned);
+  cleaned = cleaned.replace(/^["“”'`]+/, '').replace(/["“”'`]+$/, '');
+  return normalizeWhitespace(cleaned);
+};
+
+const isSummaryStyleSnippet = (snippet: string): boolean =>
+  SUMMARY_STYLE_SNIPPET_PATTERNS.some((pattern) => pattern.test(snippet));
+
+const isSnippetViable = (snippet: string): boolean => {
+  const len = snippet.length;
+  if (len < 45 || len > 380) return false;
+  if (isSummaryStyleSnippet(snippet)) return false;
+  if (!/[a-z]/i.test(snippet)) return false;
+  return true;
+};
+
+const extractKeywordTokens = (text: string): string[] => {
+  const normalized = text
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[^a-z0-9\s-]/g, ' ');
+
+  const tokens: string[] = [];
+  const seen = new Set<string>();
+  for (const token of normalized.split(/\s+/)) {
+    if (!token || token.length < 3) continue;
+    if (QUERY_STOP_WORDS.has(token)) continue;
+    if (seen.has(token)) continue;
+    seen.add(token);
+    tokens.push(token);
+    if (tokens.length >= 12) break;
+  }
+  return tokens;
+};
+
+const buildFallbackSearchQuery = (latestUserText: string): string => {
+  const tokens = extractKeywordTokens(latestUserText);
+  if (tokens.length === 0) return normalizeWhitespace(latestUserText).slice(0, 160);
+  return tokens.slice(0, 8).join(' ');
+};
+
+const buildRetrySearchQuery = (latestUserText: string): string => {
+  const tokens = extractKeywordTokens(latestUserText);
+  if (tokens.length === 0) return 'latest analysis primary sources';
+  const base = tokens.slice(0, 6).join(' ');
+  return normalizeWhitespace(`${base} evidence mechanism case study latest`).slice(0, 180);
+};
+
+const normalizePlannedQuery = (query: string, latestUserText: string): string => {
+  let cleaned = normalizeWhitespace(query);
+  cleaned = cleaned.replace(/^["'`]+|["'`]+$/g, '');
+  cleaned = cleaned.replace(/^search\s+(for|about)\s+/i, '');
+  cleaned = cleaned.replace(/[?]+$/g, '');
+  cleaned = normalizeWhitespace(cleaned);
+  if (cleaned.length > 180) cleaned = cleaned.slice(0, 180).trim();
+
+  const tokenCount = extractKeywordTokens(cleaned).length;
+  if (tokenCount < 3 || cleaned.length < 16) {
+    return buildFallbackSearchQuery(latestUserText);
+  }
+  return cleaned;
+};
+
+const getUrlDedupKey = (rawUrl: string): string => {
+  const FALLBACK = rawUrl.trim().toLowerCase();
+  try {
+    const url = new URL(rawUrl);
+    url.hash = '';
+    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid'].forEach((param) => {
+      url.searchParams.delete(param);
+    });
+    const sorted = Array.from(url.searchParams.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${k}=${v}`)
+      .join('&');
+    const path = url.pathname.replace(/\/+$/, '') || '/';
+    return `${url.protocol}//${url.hostname.toLowerCase()}${path}${sorted ? `?${sorted}` : ''}`;
+  } catch {
+    return FALLBACK;
+  }
+};
+
+const SHORT_QUESTION_SOFT_MAX = 95;
+const SHORT_QUESTION_HARD_MAX = 120;
+const SHORT_QUESTION_TARGET_WORDS = 20;
+const SHORT_QUESTION_HARD_WORDS = 24;
+const SHORT_QUESTION_MAX_SENTENCES = 2;
+const SHORT_QUESTION_MAX_WORDS_PER_SENTENCE = 14;
+
+const toWords = (text: string): string[] => text.trim().split(/\s+/).filter(Boolean);
+
+const capWords = (text: string, maxWords: number): string => {
+  const words = toWords(text);
+  if (words.length <= maxWords) return text.trim();
+  return words.slice(0, maxWords).join(' ').trim();
+};
+
+const splitRunOnSegment = (segment: string): string[] => {
+  const normalized = segment.trim();
+  if (!normalized) return [];
+  const words = toWords(normalized);
+  if (words.length <= SHORT_QUESTION_MAX_WORDS_PER_SENTENCE) return [normalized];
+
+  const markers = [' and ', ' but ', ' so ', ' because ', ' while ', ' whereas ', ', ', '; '];
+  let bestCut = -1;
+  for (const marker of markers) {
+    const idx = normalized.toLowerCase().indexOf(marker);
+    if (idx <= 0) continue;
+    const leftWords = toWords(normalized.slice(0, idx)).length;
+    if (leftWords >= 7 && leftWords <= 14) {
+      bestCut = idx + marker.length;
+      break;
+    }
+  }
+
+  if (bestCut > 0) {
+    const left = normalized.slice(0, bestCut).replace(/[,:;\s]+$/g, '').trim();
+    const right = normalized.slice(bestCut).replace(/^[,:;\s]+/g, '').trim();
+    const parts = [left, right].filter(Boolean);
+    if (parts.length > 1) return parts;
+  }
+
+  const halfwayWords = Math.min(
+    SHORT_QUESTION_MAX_WORDS_PER_SENTENCE,
+    Math.max(8, Math.floor(words.length / 2))
+  );
+  return [words.slice(0, halfwayWords).join(' '), words.slice(halfwayWords).join(' ')].filter(Boolean);
+};
+
+const shortenQuestionPrompt = (value: string): string => {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return normalized;
+
+  const rawSentences = normalized
+    .replace(/[;]+/g, '.')
+    .split(/(?<=[.!?])\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const compactSentences: string[] = [];
+  for (const sentence of rawSentences) {
+    const segments = splitRunOnSegment(sentence);
+    for (const segment of segments) {
+      const capped = capWords(segment, SHORT_QUESTION_MAX_WORDS_PER_SENTENCE);
+      if (capped) compactSentences.push(capped);
+      if (compactSentences.length >= SHORT_QUESTION_MAX_SENTENCES) break;
+    }
+    if (compactSentences.length >= SHORT_QUESTION_MAX_SENTENCES) break;
+  }
+
+  if (compactSentences.length === 0) {
+    compactSentences.push(capWords(normalized, SHORT_QUESTION_TARGET_WORDS));
+  }
+
+  let candidate = compactSentences.join(' ').trim();
+  candidate = capWords(candidate, SHORT_QUESTION_HARD_WORDS);
+
+  if (toWords(candidate).length > SHORT_QUESTION_TARGET_WORDS && compactSentences.length > 1) {
+    const firstOnly = capWords(compactSentences[0], SHORT_QUESTION_TARGET_WORDS);
+    if (firstOnly) candidate = firstOnly;
+  }
+
+  if (candidate.length <= SHORT_QUESTION_SOFT_MAX) {
+    if (!/[.!?]$/.test(candidate)) candidate += '?';
+    return candidate;
+  }
+
+  let clipped = candidate.slice(0, SHORT_QUESTION_HARD_MAX);
+  const lastSpace = clipped.lastIndexOf(' ');
+  if (lastSpace > 60) clipped = clipped.slice(0, lastSpace);
+  clipped = clipped.replace(/[,:;\-]\s*$/g, '').trim();
+  if (!/[.!?]$/.test(clipped)) clipped += '?';
+  return clipped;
+};
+
+const normalizeQuestionPrompt = (value: string): string =>
+  shortenQuestionPrompt(normalizeWhitespace(value).replace(/^[\-\d).\s]+/, '').trim());
+
+const normalizeSkeletonBlocks = (rawBlocks: unknown): SkeletonNoteBlock[] => {
+  if (!Array.isArray(rawBlocks)) return [];
+
+  const out: SkeletonNoteBlock[] = [];
+  const seenPrompts = new Set<string>();
+
+  for (const block of rawBlocks) {
+    if (!block || typeof block !== 'object') continue;
+    const kind = (block as any).kind;
+    if (kind !== 'input') continue;
+
+    const rawPrompt = typeof (block as any).prompt === 'string' ? (block as any).prompt : '';
+    const prompt = normalizeQuestionPrompt(rawPrompt);
+    if (!prompt) continue;
+
+    const promptKey = prompt.toLowerCase();
+    if (seenPrompts.has(promptKey)) continue;
+    seenPrompts.add(promptKey);
+
+    const lines = 2;
+    out.push({ kind: 'input', prompt, lines });
+
+    if (out.length >= 3) break;
+  }
+
+  return out;
+};
+
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-5-mini';
 
 export const AI_MODELS = [
@@ -289,6 +517,13 @@ export const handleReviewSkeletonNotes = async (
 You are receiving a CONVERSATION HISTORY between a Human and AI.
 Your goal is to RESPOND to the LATEST Human input, while respecting the context of the previous turn.
 
+Core persona:
+- Act like the user's thinking partner that helps ideas keep moving between sessions (implicit "extended mind").
+- Questions should scaffold future thinking when the user returns to the note.
+- Prioritize self-learning: what the user understands, believes, assumes, is unsure about, or wants to test.
+- Keep it curious and practical. Avoid therapeutic, academic, poetic, or performative tone.
+- Match the user's writing style and energy level (simple when they are brief; deeper when they are detailed).
+
 Output MUST be valid JSON only (no markdown, no code fences, no commentary) matching this TypeScript type:
 type Block =
   | { kind: "ai"; text: string } // DEPRECATED: Do NOT use this block. The app handles content display via quotes.
@@ -296,17 +531,22 @@ type Block =
 type Output = { blocks: Block[] };
 
 Output order (strict):
-1. Questions: 1–3 "input" blocks. 
-   - Base your questions primarily on the *content* of the search results (which will be displayed as quotes to the user).
-   - If you reference a specific source or concept, it MUST appear in the excerpted quotes shown to the user (not just the broader sources list).
-   - If the search results focus on a single clear fact/concept, ask what that detail *means* or changes (implications, mental model, personal take).
-   - If the results are diverse or contradictory, ask about the collective implications or the tension between them.
-   - Questions should be thought-provoking but directly relevant to the material found.
-   - Avoid quiz/trivia or "test your knowledge" framing. Do not ask for factual recall beyond what the quotes already show.
-   - Questions must be answerable from the user's perspective (opinion, interpretation, implications, or personal experience).
-   - Keep the tone comfortable and accessible; avoid overly technical or "nerdy" phrasing.
-   - It is OK to speculate about likely follow-up curiosity, but keep it grounded and answerable.
-   - Use "input" blocks: prompt is shown in gray; then render exactly "lines" empty user lines to fill in (use 2–4 for depth).
+1. Questions: 1–3 "input" blocks.
+   - Questions should be short and manageable.
+   - Strong grounding rule: if a question references specific facts/concepts, they MUST come from the excerpted snippets.
+   - It is also acceptable to ask broader metacognitive questions inspired by the overall excerpt set ("the vibe"), without naming unseen sources.
+   - Focus on interpretation, understanding, implications, assumptions, or personal viewpoint.
+   - Ask in a low-pressure, jot-friendly way. Make it easy to answer quickly.
+   - Avoid quiz/trivia framing and avoid factual recall tests.
+   - Keep wording plain and natural; avoid academic jargon.
+   - Keep prompts brief and skimmable (usually ~8-18 words; target ~20 words max).
+   - Avoid run-on phrasing and long multi-clause questions.
+   - One longer sentence or two short sentences are both fine when concise.
+   - Aim for <= 110 chars; only exceed when needed, and keep it under ~120 chars.
+   - Use "input" blocks: \`lines\` must be exactly 2.
+   - Vary depth by context through wording/content (not line count): shallow + concrete for short user text, deeper + synthesis for richer user text.
+   - Prefer bite-sized prompts, with occasional deeper follow-up.
+   - No duplicate or near-duplicate questions.
 
 Rules:
 - Do NOT output any "ai" blocks (information sections).
@@ -323,7 +563,7 @@ Only add a tag if deeper research is needed.`;
 
   const finalPrompt = `${prompt}
 
-${searchContext ? `Context from web search (incorporate relevant findings into the information section where helpful, but do not explicitly cite "search results"):
+${searchContext ? `Context from web search (use these snippets to ground question specificity):
 ${searchContext}` : ''
     }
 
@@ -337,7 +577,7 @@ LATEST USER INPUT (Focus your response here):
 ${latestUserText} `;
 
   return runBasicAgent(
-    'You are a note-taking assistant that outputs ONLY JSON matching the specified TypeScript type, optionally followed by a single [SEARCH_*] tag.',
+    'You are a reflective note scaffolding assistant. Output ONLY valid JSON matching the specified TypeScript type, optionally followed by a single [SEARCH_*] tag.',
     finalPrompt,
     model,
   );
@@ -357,10 +597,13 @@ export const handlePlanSearch = async (
   const conversationHistory = hasContext ? weighted!.fullContext : `[HUMAN]: ${text}`;
   const priorityContext = hasContext ? weighted!.priorityContext : '';
   const latestUserText = hasContext ? getLastHumanText(context) : text;
+  const todayIso = new Date().toISOString().slice(0, 10);
 
-  const prompt = `You are an Expert Search Strategist. Your goal is to find content that connects the user's text to unexpected fields, history, or future possibilities. Avoid the obvious.
+  const prompt = `You are an Expert Search Strategist. Generate one high-signal web query that helps produce useful reflective prompts for the user's latest note.
 
-Analyze the user's text and craft strategic queries. Use as few queries as needed to get high-quality results (typically 2-5).
+Today: ${todayIso}
+
+Analyze the context and craft exactly one query only when search is needed.
 
 Return ONLY valid JSON:
 type Plan = {
@@ -368,8 +611,16 @@ type Plan = {
   queries: Array<{ type: "web"; query: string; reason?: string }>;
 };
 
-GOALS BY TYPE:
-• WEB (Article): Find primary sources, surprising research findings, or in-depth analysis from reputable institutions. Look for content that provides substantive context and "rabbit holes" to explore.
+Query quality requirements:
+- Query should be specific and information-dense (target ~8-16 words).
+- Include concrete anchor terms from the latest user text (proper nouns, topic terms, domain terms).
+- Add one disambiguator when possible: timeframe, region, methodology, mechanism, or named entity.
+- Prefer terms likely to appear in authoritative article titles.
+- Avoid vague meta phrasing ("learn about", "interesting facts", "overview").
+- If user asks for current/latest status, include a recent year or "latest".
+- Do not use natural-language questions; output a search-ready phrase.
+- Favor sources likely to contain concrete claims, tensions, mechanisms, case studies, or counterpoints.
+- Optimize for sources that can trigger self-understanding questions, not just generic definitions.
 
 Text to analyze:
 ${conversationHistory}
@@ -383,7 +634,7 @@ ${latestUserText}`;
   const agent = new Agent({
     name: 'SearchPlanner',
     instructions:
-      'You are a proactive research assistant. You default to searching (shouldSearch: true) unless the request is trivial or purely creative writing. You must return strict JSON per the provided Plan type and nothing else.',
+      'You are a proactive research assistant. Default to shouldSearch: true unless the request is trivial or purely creative writing. Return strict JSON matching Plan and nothing else. Your query should support reflective, user-centered follow-up questions.',
     model: modelToUse,
   });
 
@@ -399,9 +650,21 @@ ${latestUserText}`;
       return { shouldSearch: false, queries: [] };
     }
 
-    const clampedQueries = validated.data.queries.slice(0, 3);
+    const clampedQueries = validated.data.queries
+      .slice(0, 1)
+      .map((query) => ({
+        ...query,
+        query: normalizePlannedQuery(query.query, latestUserText),
+      }))
+      .filter((query) => query.query.length > 0);
+
     if (validated.data.shouldSearch && clampedQueries.length === 0) {
-      return { shouldSearch: false, queries: [] };
+      const fallbackQuery = buildFallbackSearchQuery(latestUserText);
+      if (!fallbackQuery) return { shouldSearch: false, queries: [] };
+      return {
+        shouldSearch: true,
+        queries: [{ type: 'web', query: fallbackQuery }],
+      };
     }
 
     return {
@@ -538,7 +801,7 @@ const runSearchAgentForQuery = async (
   const agent = new Agent({
     name: 'WebSearchAgent',
     instructions:
-      'You are an Expert Research Agent. Your goal is to find high-signal, interesting, and authoritative content to embed in a professional document.\n\n' +
+      'You are an Expert Research Agent. Your goal is to find high-signal, interesting, and authoritative content to embed in a document.\n\n' +
       'FOR IMAGES:\n' +
       '• Target diagrams, infographics, historical photos, or technical screenshots.\n' +
       '• Avoid generic icons, logos, or stock photos.\n' +
@@ -548,7 +811,10 @@ const runSearchAgentForQuery = async (
       '• Ensure the source is reputable (universities, experts, official channels).\n\n' +
       'FOR ARTICLES (WEB):\n' +
       '• Target primary sources or surprising expert findings.\n' +
-      '• EXTRACT A DIRECT QUOTE: For the "snippet", copy 1-2 interesting sentences directly from the source. Do NOT summarize.\n\n' +
+      '• Prefer official, or technically credible sources over generic SEO blogs.\n' +
+      '• Prefer excerpts with concrete claims, tensions, mechanisms, tradeoffs, or examples that can spark reflective questions.\n' +
+      '• EXTRACT A DIRECT QUOTE: For "snippet", copy 1-2 verbatim source sentences (not a summary).\n' +
+      '• Snippet quality: concrete claim/detail, 45-300 chars, no URL text, no "this article explains..." phrasing.\n\n' +
       'OUTPUT:\n' +
       'Return JSON: { "results": [ { "title": string, "url": string, "snippet"?: string, "thumbnail"?: string } ] }\n' +
       'Limit to 5 results.',
@@ -584,10 +850,43 @@ Return ONLY the required JSON structure (no extra text). Output must be valid JS
       );
     }
 
-    return validation.data.results.map((item) => ({
-      type: query.type,
-      ...item,
-    }));
+    const deduped: AgentSearchResult[] = [];
+    const seenUrls = new Set<string>();
+    const seenSnippets = new Set<string>();
+
+    for (const item of validation.data.results) {
+      const title = normalizeWhitespace(item.title);
+      const url = normalizeWhitespace(item.url);
+      if (!title || !url) continue;
+
+      const urlKey = getUrlDedupKey(url);
+      if (seenUrls.has(urlKey)) continue;
+
+      const cleanedSnippet = item.snippet ? cleanSearchSnippet(item.snippet) : undefined;
+      let snippet: string | undefined;
+      if (cleanedSnippet && isSnippetViable(cleanedSnippet)) {
+        snippet = cleanedSnippet;
+      } else if (cleanedSnippet && cleanedSnippet.length >= 25) {
+        // Relaxed fallback so excerpt rendering can still work when quote quality is imperfect.
+        snippet = cleanedSnippet.slice(0, 380).trim();
+      }
+      const snippetKey = snippet ? snippet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() : '';
+
+      if (snippetKey && seenSnippets.has(snippetKey)) continue;
+
+      seenUrls.add(urlKey);
+      if (snippetKey) seenSnippets.add(snippetKey);
+
+      deduped.push({
+        type: query.type,
+        title,
+        url,
+        snippet,
+        thumbnail: item.thumbnail ? normalizeWhitespace(item.thumbnail) : undefined,
+      });
+    }
+
+    return deduped.slice(0, 5);
   } catch (err) {
     console.error(`[SearchAgent] run failed for "${query.query}":`, err);
     throw err;
@@ -609,7 +908,7 @@ export const handleExploreSource = async (
       'STRICT: State the fact DIRECTLY. Do NOT attribute it (no "The authors show...", "The study says...", "According to the article..."). ' +
       'BAD: "The study demonstrates that cats sleep 18 hours." ' +
       'GOOD: "Cats sleep 18 hours a day, utilizing a unique REM cycle." ' +
-      'STRICT: Provide ONLY a direct, interesting technical or historical fact found within or about the source. ' +
+      'STRICT: Provide ONLY a direct, interesting fact found within or about the source. ' +
       'STRICT: If previous context is provided, you MUST find a completely different, new, and deeper detail. ' +
       'MAX LENGTH: 45 words. 2 sentences maximum. ' +
       'STRICT NO LINKS: Never include URLs, markdown links, or domain names. ' +
@@ -682,8 +981,9 @@ export const parseSkeletonNotes = (text: string): SkeletonNotes => {
 
   try {
     const parsed = JSON.parse(jsonPart) as { blocks: SkeletonNoteBlock[] };
+    const normalizedBlocks = normalizeSkeletonBlocks(parsed.blocks);
     return {
-      blocks: parsed.blocks || [],
+      blocks: normalizedBlocks,
       searchTag: tagPart || undefined,
     };
   } catch (e) {
@@ -709,20 +1009,44 @@ export const handleFullReview = async (
   const validContext = context || [];
   const plan = await handlePlanSearch(text, model, validContext);
   console.log('[handleFullReview] Plan:', plan);
+  const latestUserText = validContext.length > 0 ? getLastHumanText(validContext) : text;
+  const primaryFallbackQuery = buildFallbackSearchQuery(latestUserText) || buildFallbackSearchQuery(text) || 'latest analysis';
 
-  // 2. Execute searches in parallel (if needed)
+  // 2. Execute searches (always attempt at least one query)
   let searchResults: AgentSearchResult[] = [];
-  if (plan.shouldSearch && plan.queries.length > 0) {
-    console.log('[handleFullReview] Executing', plan.queries.length, 'searches in parallel...');
-    // Map SearchType to AgentSearchResultType ('web' -> 'article')
-    const agentQueries: AgentSearchQuery[] = plan.queries.map(q => ({
-      type: q.type === 'web' ? 'article' : q.type,
-      query: q.query,
-      reason: q.reason,
-    }));
-    searchResults = await handleAgentSearch(agentQueries, model);
-    console.log('[handleFullReview] Got', searchResults.length, 'search results');
+  const plannedQueries: AgentSearchQuery[] = plan.queries.map(q => ({
+    type: q.type === 'web' ? 'article' : q.type,
+    query: q.query,
+    reason: q.reason,
+  }));
+  const agentQueries: AgentSearchQuery[] = plannedQueries.length > 0
+    ? plannedQueries
+    : [{ type: 'article', query: primaryFallbackQuery, reason: 'fallback_always_search' }];
+
+  console.log('[handleFullReview] Executing', agentQueries.length, 'searches...');
+  searchResults = await handleAgentSearch(agentQueries, model);
+
+  if (searchResults.length === 0) {
+    const retryQuery = buildRetrySearchQuery(latestUserText);
+    const retryAgentQuery: AgentSearchQuery = { type: 'article', query: retryQuery, reason: 'fallback_retry_search' };
+    const sameAsPrimary = agentQueries.some((q) => q.query.toLowerCase() === retryQuery.toLowerCase());
+    if (!sameAsPrimary) {
+      console.log('[handleFullReview] Primary search empty; retrying with broader fallback query...');
+      searchResults = await handleAgentSearch([retryAgentQuery], model);
+    }
   }
+
+  if (searchResults.length === 0) {
+    // Final fallback keeps sources/excerpts section non-empty even if upstream search fails.
+    const fallbackUrl = `https://www.google.com/search?q=${encodeURIComponent(primaryFallbackQuery)}`;
+    searchResults = [{
+      type: 'article',
+      title: `Fallback source: ${primaryFallbackQuery}`,
+      url: fallbackUrl,
+      snippet: 'Search results were unavailable. Open this source and clip one concrete line into your note.',
+    }];
+  }
+  console.log('[handleFullReview] Got', searchResults.length, 'search results');
 
   // 3. Generate narrative with search context
   const searchContext = searchResults.length > 0
@@ -732,6 +1056,15 @@ export const handleFullReview = async (
   console.log('[handleFullReview] Generating narrative...');
   const narrativeText = await handleReviewSkeletonNotes(text, model, searchContext, validContext);
   const narrative = parseSkeletonNotes(narrativeText);
+  if (narrative.blocks.length === 0) {
+    narrative.blocks = [{
+      kind: 'input',
+      prompt: searchResults.length > 0
+        ? 'What idea here feels most worth carrying forward the next time you return, and why?'
+        : 'What part of your thinking feels least settled right now, and what would clarify it next?',
+      lines: 2,
+    }];
+  }
   console.log('[handleFullReview] Generated', narrative.blocks.length, 'blocks');
 
   return { plan, searchResults, narrative };

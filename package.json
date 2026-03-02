@@ -63,7 +63,7 @@
     },
     "scripts": {
         "dev:client": "vite",
-        "dev:server": "tsx server/src/index.ts",
+        "dev:server": "tsx watch server/src/index.ts",
         "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
         "build": "vite build"
     }

@@ -18,11 +18,6 @@ const AI_NODE_SELECTOR =
 const PRIMARY_BLOCK_TAGS = new Set(['P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE']);
 
 const normalizeWhitespace = (value: string) => value.replace(/\s+/g, ' ').trim();
-const deriveTitleFromContent = (content: string) => {
-  const text = normalizeWhitespace(content.replace(/<[^>]*>/g, ' '));
-  return text ? text.slice(0, 64) : 'Untitled';
-};
-
 const stripAiNodesPreserveHuman = (root: HTMLElement) => {
   const aiElements = Array.from(root.querySelectorAll<HTMLElement>(AI_NODE_SELECTOR));
   const extractAllowedContent = (node: Node, fragment: DocumentFragment) => {
@@ -315,7 +310,7 @@ export default function App() {
       const nextDraft = {
         ...draftDocument,
         content: initialContent,
-        title: initialContent ? deriveTitleFromContent(initialContent) : draftDocument.title,
+        title: draftDocument.title || 'Untitled',
         updatedAt: now,
       };
       setDraftDocument(nextDraft);
